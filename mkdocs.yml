@@ -1,5 +1,7 @@
 site_name: rbac-auditor
-site_description: One-line description.
+site_description: >-
+  Kubernetes RBAC as a weekly markdown report a human actually reads, plus
+  who-can queries and snapshot diffs for drift.
 repo_url: https://github.com/fabiocicerchia/rbac-auditor
 docs_dir: docs
 

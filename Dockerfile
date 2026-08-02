@@ -13,8 +13,8 @@ RUN curl -fsSLo /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TA
 FROM python:3.13-alpine3.22
 LABEL org.opencontainers.image.title="rbac-auditor" \
       org.opencontainers.image.description="Dump and diff Kubernetes RBAC into readable reports" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/fabiocicerchia/freelancing"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/fabiocicerchia/rbac-auditor"
 RUN pip install --no-cache-dir pyyaml==6.0.2 \
  && adduser -D -u 10001 auditor
 COPY --from=fetch /kubectl /usr/local/bin/kubectl

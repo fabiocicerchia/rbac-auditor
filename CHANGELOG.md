@@ -8,16 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-### Changed
-### Deprecated
-### Removed
-### Fixed
-### Security
 
-## [0.1.0] - YYYY-MM-DD
+- `report`, `dump`, `diff` and `who-can` over Kubernetes RBAC, plus a
+  read-only ClusterRole and CronJob manifest for a weekly in-cluster report.
 
-### Added
-- Initial release.
-
-[Unreleased]: https://github.com/fabiocicerchia/rbac-auditor/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/fabiocicerchia/rbac-auditor/releases/tag/v0.1.0
+Not yet released.

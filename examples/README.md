@@ -1,6 +1,8 @@
 # Examples
 
-Runnable, self-contained examples. Each subfolder (or file) should run with a
-single command and show one clear use case.
+- [`basic/`](basic) — create a dangling binding in a throwaway `kind` cluster,
+  then find it; plus a snapshot diff and the limits of `who-can`.
 
-- `basic/` — minimal end-to-end example.
+For the in-cluster weekly report, the manifests are the example:
+[`manifests/cronjob.yaml`](../manifests/cronjob.yaml) — CronJob, ServiceAccount
+and a read-only ClusterRole, short enough to review before applying.
