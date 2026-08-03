@@ -10,7 +10,7 @@ RUN apk add --no-cache curl ca-certificates
 RUN curl -fsSLo /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl" \
  && chmod 0755 /kubectl
 
-FROM python:3.13-alpine3.22
+FROM python:3.14-alpine3.22
 LABEL org.opencontainers.image.title="rbac-auditor" \
       org.opencontainers.image.description="Dump and diff Kubernetes RBAC into readable reports" \
       org.opencontainers.image.licenses="Apache-2.0" \
