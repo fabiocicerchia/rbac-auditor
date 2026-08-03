@@ -2,7 +2,7 @@
 # who-can queries, unused ServiceAccounts, wildcard grants.
 ARG KUBECTL_VERSION=1.33.2
 
-FROM alpine:3.22 AS fetch
+FROM alpine:3.24 AS fetch
 ARG KUBECTL_VERSION
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
