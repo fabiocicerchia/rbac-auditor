@@ -1,0 +1,23 @@
+site_name: rbac-auditor
+site_description: >-
+  Kubernetes RBAC as a weekly markdown report a human actually reads, plus
+  who-can queries and snapshot diffs for drift.
+repo_url: https://github.com/fabiocicerchia/rbac-auditor
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - scheme: slate
+      toggle: { icon: material/weather-sunny, name: Light mode }
+
+nav:
+  - Home: README.md
+  - Getting Started: getting-started.md
+  - Architecture: architecture.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
