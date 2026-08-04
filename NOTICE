@@ -3,3 +3,28 @@ Copyright 2026 Fabio Cicerchia
 
 This product includes software developed by
 Fabio Cicerchia (https://github.com/fabiocicerchia).
+
+The Apache-2.0 license on this repository covers the packaging only: the
+Dockerfile and rbac_audit.py. The published container image redistributes
+the following third-party software, each under its own license:
+
+  kubectl 1.33.2  Apache-2.0  https://github.com/kubernetes/kubernetes
+  PyYAML 6.0.2    MIT         https://github.com/yaml/pyyaml
+
+--------------------------------------------------------------------
+Kubernetes (kubectl)
+Copyright 2014-2026 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0.
+https://github.com/kubernetes/kubernetes/blob/master/LICENSE
+Upstream NOTICE: https://github.com/kubernetes/kubernetes/blob/master/NOTICE
+
+PyYAML
+Copyright 2017-2026 Ingy dot Net; Copyright 2006-2016 Kirill Simonov.
+Licensed under the MIT License.
+https://github.com/yaml/pyyaml/blob/main/LICENSE
+--------------------------------------------------------------------
+
+The base image is python:3.13-alpine3.22, which contains CPython
+(PSF-2.0, https://www.python.org/) on Alpine Linux. Alpine's packages
+carry their own licenses (musl MIT, busybox GPL-2.0-only); source is
+published at https://gitlab.alpinelinux.org/alpine/aports.
