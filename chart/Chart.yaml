@@ -4,3 +4,9 @@ description: Helm chart for rbac-auditor
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+
+# License of the packaged application. ArtifactHub reads this annotation.
+annotations:
+  artifacthub.io/license: Apache-2.0
+sources:
+  - https://github.com/fabiocicerchia/rbac-auditor
