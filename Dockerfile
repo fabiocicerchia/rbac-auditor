@@ -7,7 +7,11 @@ ARG KUBECTL_VERSION
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN apk add --no-cache curl ca-certificates
+# pipefail so the checksum comparison below can't be silently skipped
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 RUN curl -fsSLo /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl" \
+ && curl -fsSLo /kubectl.sha256 "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl.sha256" \
+ && echo "$(cat /kubectl.sha256)  /kubectl" | sha256sum -c - \
  && chmod 0755 /kubectl
 
 FROM python:3.14-alpine3.22
