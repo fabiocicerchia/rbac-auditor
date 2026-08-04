@@ -21,6 +21,7 @@ LABEL org.opencontainers.image.title="rbac-auditor" \
       org.opencontainers.image.source="https://github.com/fabiocicerchia/rbac-auditor"
 RUN pip install --no-cache-dir pyyaml==6.0.2 \
  && adduser -D -u 10001 auditor
+COPY NOTICE /NOTICE
 COPY --from=fetch /kubectl /usr/local/bin/kubectl
 COPY rbac_audit.py /usr/local/bin/rbac-audit
 USER 10001
