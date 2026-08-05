@@ -20,11 +20,13 @@ from datetime import datetime, timezone
 
 
 def kubectl_json(*args):
-    out = subprocess.run(
+    p = subprocess.run(
         ["kubectl", "get", *args, "-A", "-o", "json"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    return json.loads(out)["items"]
+        capture_output=True, text=True,
+    )
+    if p.returncode:
+        sys.exit(f"kubectl get {' '.join(args)} failed:\n{p.stderr.strip()}")
+    return json.loads(p.stdout)["items"]
 
 
 def snapshot():
