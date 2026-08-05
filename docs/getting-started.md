@@ -8,7 +8,17 @@ image, and it uses whatever credentials you give it.
 ## First report, from your laptop
 
 ```sh
-docker run --rm -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
+  fabiocicerchia/rbac-auditor report
+```
+
+A kind cluster publishes its API server on `127.0.0.1`, so add `--network host`
+(its kubeconfig embeds the certs, nothing else to mount):
+
+```sh
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor report
 ```
 
@@ -87,11 +97,13 @@ The report tells you what is true. The diff tells you what changed, which is
 usually the question:
 
 ```sh
-docker run --rm -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor dump > snapshots/2026-01.json
 
 # a month later
-docker run --rm -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   -v "$PWD/snapshots:/snapshots:ro" \
   fabiocicerchia/rbac-auditor diff /snapshots/2026-01.json
 ```
@@ -108,7 +120,8 @@ month-over-month diff is small enough that someone will actually read it.
 ## Ask who can do something
 
 ```sh
-docker run --rm -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor who-can delete pods
 ```
 
@@ -126,7 +139,8 @@ Use `who-can` to find candidates; use `auth can-i` to confirm them.
 ## Gate on it in CI
 
 ```sh
-docker run --rm -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor report --fail-on-findings
 ```
 
