@@ -1,0 +1,12 @@
+failure-threshold: warning
+
+ignored:
+  # Pinning every apt package version is unmaintainable on a base image that
+  # gets rebuilt weekly; the digest pin on FROM is what actually pins the build.
+  - DL3008
+  - DL3018
+
+trustedRegistries:
+  - docker.io
+  - ghcr.io
+  - gcr.io
