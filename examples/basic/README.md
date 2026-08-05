@@ -28,7 +28,8 @@ including on the day someone creates it.
 ## Find it
 
 ```sh
-docker run --rm --network host -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor report
 ```
 
@@ -47,13 +48,15 @@ you do not need it.
 Take a snapshot, change something, diff:
 
 ```sh
-docker run --rm --network host -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor dump > before.json
 
 kubectl create clusterrolebinding oops \
   --clusterrole=cluster-admin --serviceaccount=default:default
 
-docker run --rm --network host -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   -v "$PWD:/snapshots:ro" \
   fabiocicerchia/rbac-auditor diff /snapshots/before.json
 ```
@@ -69,14 +72,16 @@ month-over-month diff is a handful.
 The report now also flags it directly:
 
 ```sh
-docker run --rm --network host -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor report | grep -A3 'cluster-admin'
 ```
 
 ## Check `who-can` against the authoritative answer
 
 ```sh
-docker run --rm --network host -v ~/.kube:/home/auditor/.kube:ro \
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
   fabiocicerchia/rbac-auditor who-can delete pods
 
 kubectl auth can-i delete pods --as=system:serviceaccount:default:default

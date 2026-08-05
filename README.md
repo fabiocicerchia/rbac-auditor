@@ -33,7 +33,8 @@ docker pull fabiocicerchia/rbac-auditor:0.1.0
 
 ```sh
 # local, using your kubeconfig
-docker run --rm -v ~/.kube:/home/auditor/.kube:ro fabiocicerchia/rbac-auditor report
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig fabiocicerchia/rbac-auditor report
 
 # weekly in-cluster report (read-only ClusterRole included)
 kubectl apply -f manifests/cronjob.yaml
