@@ -5,6 +5,7 @@
 [![Security](https://github.com/fabiocicerchia/rbac-auditor/actions/workflows/security.yml/badge.svg)](https://github.com/fabiocicerchia/rbac-auditor/actions/workflows/security.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/fabiocicerchia/rbac-auditor/badge)](https://securityscorecards.dev/viewer/?uri=github.com/fabiocicerchia/rbac-auditor)
+[![CI carbon](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fabiocicerchia/rbac-auditor/gh-pages/badge.json)](.github/workflows/carbon-badge.yml)
 
 Dumps and diffs Kubernetes **RBAC into readable reports**: wildcard grants,
 cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus
