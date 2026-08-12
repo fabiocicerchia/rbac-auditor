@@ -2,7 +2,7 @@
 # who-can queries, unused ServiceAccounts, wildcard grants.
 ARG KUBECTL_VERSION=1.33.2
 
-FROM alpine:3.24 AS fetch
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS fetch
 ARG KUBECTL_VERSION
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -14,7 +14,7 @@ RUN curl -fsSLo /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TA
  && echo "$(cat /kubectl.sha256)  /kubectl" | sha256sum -c - \
  && chmod 0755 /kubectl
 
-FROM python:3.14-alpine3.22
+FROM python:3.14-alpine3.22@sha256:6b91e66ab2a880ce9ca5a1b91c70f45963ff71ff68268df056336e1a657d5efd
 LABEL org.opencontainers.image.title="rbac-auditor" \
       org.opencontainers.image.description="Dump and diff Kubernetes RBAC into readable reports" \
       org.opencontainers.image.licenses="Apache-2.0" \
