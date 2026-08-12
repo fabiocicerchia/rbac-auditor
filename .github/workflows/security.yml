@@ -46,19 +46,19 @@ jobs:
         with:
           sarif_file: trivy.sarif
 
-  # CodeQL is language-specific. Uncomment and set languages once the repo
-  # has code. Supported: c-cpp, csharp, go, java-kotlin, javascript-typescript,
-  # python, ruby, swift.
-  #
-  # codeql:
-  #   name: codeql
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     matrix:
-  #       language: [javascript-typescript]
-  #   steps:
-  #     - uses: actions/checkout@v7
-  #     - uses: github/codeql-action/init@v3
-  #       with:
-  #         languages: ${{ matrix.language }}
-  #     - uses: github/codeql-action/analyze@v3
+  codeql:
+    name: codeql
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # upload SARIF to the Security tab
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
