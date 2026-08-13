@@ -12,10 +12,29 @@ spec:
         spec:
           serviceAccountName: rbac-auditor
           restartPolicy: Never
+          # The image declares USER 10001; stating it here means an image
+          # change cannot quietly move this onto root.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile: { type: RuntimeDefault }
           containers:
             - name: audit
-              image: fabiocicerchia/rbac-auditor
+              # Pinned: the bare name resolved to :latest, which would silently
+              # change what this cluster-reader runs. Matches publish.yml.
+              image: ghcr.io/fabiocicerchia/rbac-auditor:1.0.0
               args: ["report"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              # It reads the RBAC API and writes a report to stdout; no CPU
+              # limit on purpose, since throttling a weekly job buys nothing.
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }
 ---
 apiVersion: v1
 kind: ServiceAccount
