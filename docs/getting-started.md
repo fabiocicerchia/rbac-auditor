@@ -156,3 +156,33 @@ make lint      # hadolint + py_compile
 make test      # help text renders, kubectl present, script compiles
 make release   # multi-arch buildx push
 ```
+
+## HTML reports
+
+Terminal output is fine for a person at a keyboard and no use as a
+point-in-time record. `--html` writes the same findings as a self-contained
+document — no external stylesheet, font or script, so it renders the same on an
+air-gapped laptop a year from now:
+
+```sh
+rbac-audit report --html rbac-$(date +%F).html
+```
+
+The header states which cluster it describes (context name *and* API server
+URL, since two kubeconfigs can name the same server differently) and when it
+was generated.
+
+Add `--s3` to upload it, with server-side encryption on by default:
+
+```sh
+rbac-audit report --html rbac.html --s3 s3://my-audit-bucket/rbac/ --sse AES256
+```
+
+Upload uses the AWS CLI, so it picks up whatever credentials are already
+configured. **A failed upload never loses the local report and never changes
+the exit code** — the audit succeeded, only its delivery did not.
+
+> **Treat these reports as sensitive.** A report enumerates who can do what in
+> the cluster, which is a map of the permissions worth attacking. Use a private
+> bucket, never a public ACL, and keep the same care you would for the
+> kubeconfig itself.

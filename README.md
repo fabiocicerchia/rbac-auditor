@@ -18,7 +18,7 @@ report a human actually reads.
 
 | Command | Output |
 |---|---|
-| `report` | markdown findings report (add `--fail-on-findings` for CI gates) |
+| `report` | markdown findings report (`--fail-on-findings` for CI gates, `--html PATH` for a shareable report) |
 | `dump` | raw JSON snapshot for archiving |
 | `diff old.json` | added/removed/changed roles & bindings vs. a snapshot |
 | `who-can VERB RESOURCE` | subjects that can e.g. `delete pods` |
