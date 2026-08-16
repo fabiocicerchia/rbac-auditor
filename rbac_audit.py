@@ -147,7 +147,9 @@ def cluster_identity():
     """
 
     def kubectl(*args):
-        p = subprocess.run(["kubectl", *args], capture_output=True, text=True)
+        p = subprocess.run(
+            ["kubectl", *args], capture_output=True, text=True, check=False
+        )
         return p.stdout.strip() if p.returncode == 0 else ""
 
     context = kubectl("config", "current-context") or "unknown"
@@ -277,7 +279,8 @@ def upload_s3(path, destination, sse="AES256"):
     key = destination.rstrip("/") + "/" + os.path.basename(path)
     cmd = ["aws", "s3", "cp", path, key, "--sse", sse]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        # check=False: the return code is the answer here, not an exception.
+        p = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         return "aws CLI not found on PATH"
     if p.returncode:

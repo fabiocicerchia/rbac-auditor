@@ -8,6 +8,7 @@ import sys
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -35,7 +36,7 @@ SNAP = {
 class WellFormed(HTMLParser):
     """Minimal well-formedness check: every non-void tag is closed, in order."""
 
-    VOID = {"meta", "br", "hr", "img", "input", "link"}
+    VOID: ClassVar[set] = {"meta", "br", "hr", "img", "input", "link"}
 
     def __init__(self):
         super().__init__()
