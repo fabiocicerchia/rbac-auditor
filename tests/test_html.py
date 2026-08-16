@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import rbac_audit as ra  # noqa: E402
+import rbac_audit as ra
 
 SNAP = {
     "taken_at": "2026-08-15T09:00:00+00:00",
