@@ -9,6 +9,7 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import rbac_audit as ra
@@ -92,7 +93,8 @@ class MatchTest(unittest.TestCase):
 
 
 class ReportTest(unittest.TestCase):
-    snap = {
+    # ClassVar: it is a fixture shared by the tests below, never mutated.
+    snap: ClassVar[dict] = {
         "taken_at": "2026-08-15T00:00:00Z",
         "roles": [],
         "clusterroles": [
