@@ -3,6 +3,7 @@
 stdlib unittest, run with `python3 -m unittest discover tests`: the image has
 no test framework in it and this is not worth adding one for.
 """
+
 import sys
 import unittest
 from html.parser import HTMLParser
@@ -106,8 +107,15 @@ class UploadTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(
             run.call_args.args[0],
-            ["aws", "s3", "cp", "/tmp/report.html", "s3://bucket/audits/report.html",
-             "--sse", "aws:kms"],
+            [
+                "aws",
+                "s3",
+                "cp",
+                "/tmp/report.html",
+                "s3://bucket/audits/report.html",
+                "--sse",
+                "aws:kms",
+            ],
         )
 
     def test_default_encryption_is_requested(self):
