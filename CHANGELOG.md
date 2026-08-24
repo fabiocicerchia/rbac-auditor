@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.0.1...v1.1.0) (2026-08-24)
+
+
+### Features
+
+* **report:** self-contained HTML report with optional S3 upload ([#28](https://github.com/fabiocicerchia/rbac-auditor/issues/28)) ([38fcb58](https://github.com/fabiocicerchia/rbac-auditor/commit/38fcb58cbbf2bb481e81d1d5e7b9a68eb886290a))
+* **report:** suppress accepted findings with .rbac-audit-ignore ([#27](https://github.com/fabiocicerchia/rbac-auditor/issues/27)) ([9356cb6](https://github.com/fabiocicerchia/rbac-auditor/commit/9356cb6f616fe476d6e5ed7ee09c056146d2ac5b))
+
 ## [1.0.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.0.0...v1.0.1) (2026-08-13)
 
 
