@@ -3,6 +3,7 @@
 
 Commands:
   report              full markdown report (findings + inventory)
+                      --ignore-file PATH   suppressions (default .rbac-audit-ignore)
                       --html PATH          also write a self-contained HTML report
                       --s3 s3://BUCKET/PREFIX  upload it (--sse, default AES256)
   dump                raw JSON snapshot (for diffing / archiving)
@@ -52,6 +53,16 @@ def name(obj):
     return f"{m.get('namespace', '')}/{m['name']}".lstrip("/")
 
 
+def finding(text, subject="", role="", verb=""):
+    """One finding, in the shape the ignore file matches against.
+
+    The text is what a human reads; subject/role/verb are what a suppression
+    names. Kept as three separate fields rather than parsed back out of the
+    text, so a reworded finding does not silently stop matching its
+    suppression."""
+    return {"text": text, "subject": subject, "role": role, "verb": verb}
+
+
 def wildcard_findings(snap):
     for kind in ("roles", "clusterroles"):
         for role in snap[kind]:
@@ -59,7 +70,11 @@ def wildcard_findings(snap):
                 if "*" in (rule.get("verbs") or []) and "*" in (
                     rule.get("resources") or []
                 ):
-                    yield f"`{name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources"
+                    yield finding(
+                        f"`{name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources",
+                        role=name(role),
+                        verb="*",
+                    )
 
 
 def cluster_admin_findings(snap):
@@ -74,7 +89,11 @@ def cluster_admin_findings(snap):
                 )
                 or "(no subjects)"
             )
-            yield f"clusterrolebinding `{b['metadata']['name']}` grants cluster-admin to {subjects}"
+            yield finding(
+                f"clusterrolebinding `{b['metadata']['name']}` grants cluster-admin to {subjects}",
+                subject=subjects,
+                role="cluster-admin",
+            )
 
 
 def unused_sa_findings(snap):
@@ -85,7 +104,10 @@ def unused_sa_findings(snap):
     for sa in snap["serviceaccounts"]:
         key = (sa["metadata"]["namespace"], sa["metadata"]["name"])
         if sa["metadata"]["name"] != "default" and key not in used:
-            yield f"ServiceAccount `{key[0]}/{key[1]}` is not used by any pod"
+            yield finding(
+                f"ServiceAccount `{key[0]}/{key[1]}` is not used by any pod",
+                subject=f"ServiceAccount:{key[0]}/{key[1]}",
+            )
 
 
 def dangling_binding_findings(snap):
@@ -102,24 +124,178 @@ def dangling_binding_findings(snap):
                         s["name"],
                     )
                     if key not in sas:
-                        yield f"{kind[:-1]} `{name(b)}` references missing ServiceAccount `{key[0]}/{key[1]}`"
+                        yield finding(
+                            f"{kind[:-1]} `{name(b)}` references missing ServiceAccount `{key[0]}/{key[1]}`",
+                            subject=f"ServiceAccount:{key[0]}/{key[1]}",
+                            role=b.get("roleRef", {}).get("name", ""),
+                        )
 
 
-def report(snap):
-    print(f"# RBAC audit — {snap['taken_at']}\n")
-    sections = [
+# --- suppressions ------------------------------------------------------------
+
+IGNORE_FILE = ".rbac-audit-ignore"
+
+
+class IgnoreError(Exception):
+    """A malformed ignore file. Fatal: a suppression nobody can read is worse
+    than no suppression, because it hides findings without saying so."""
+
+
+def parse_ignore(text):
+    """Parse .rbac-audit-ignore.
+
+    One rule per line, `field=value` pairs separated by spaces, `#` starts a
+    comment. `reason=` is required — an accepted risk with no stated reason is
+    indistinguishable from a mistake six months later:
+
+        # noisy but accepted
+        role=system:controller:* reason=ships with Kubernetes
+        subject=ServiceAccount:kube-system/default reason=cluster bootstrap
+
+    Values may end in `*` to match a prefix. `reason=` swallows the rest of the
+    line, so it needs no quoting.
+    """
+    rules = []
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        rule = {"line": lineno, "raw": line}
+        rest = line
+        while rest:
+            field, sep, rest = rest.partition("=")
+            field = field.strip()
+            if not sep:
+                raise IgnoreError(
+                    f"{IGNORE_FILE}:{lineno}: expected field=value, got {field!r}"
+                )
+            if field == "reason":
+                rule["reason"] = rest.strip()
+                rest = ""
+                break
+            # A value runs to the next " field=" boundary.
+            value, rest = _split_value(rest)
+            if field not in ("subject", "role", "verb"):
+                raise IgnoreError(f"{IGNORE_FILE}:{lineno}: unknown field {field!r}")
+            rule[field] = value
+        if not rule.get("reason"):
+            raise IgnoreError(f"{IGNORE_FILE}:{lineno}: every entry needs reason=…")
+        if not any(k in rule for k in ("subject", "role", "verb")):
+            raise IgnoreError(
+                f"{IGNORE_FILE}:{lineno}: needs at least one of subject/role/verb"
+            )
+        rules.append(rule)
+    return rules
+
+
+def _split_value(rest):
+    """Split `value field=…` into the value and what follows.
+
+    Values can contain almost anything (`system:controller:*`), so the boundary
+    is the last space before the next `field=`, not the first space.
+    """
+    words = rest.split()
+    for i, w in enumerate(words):
+        if (
+            i
+            and "=" in w
+            and w.split("=", 1)[0] in ("subject", "role", "verb", "reason")
+        ):
+            return " ".join(words[:i]), " ".join(words[i:])
+    return rest.strip(), ""
+
+
+def _matches(pattern, value):
+    # An empty value means the finding has no such attribute — an unused
+    # ServiceAccount has no verb — so a rule naming that field cannot match it.
+    # Without this, `verb=*` (prefix-glob on the empty string) would suppress
+    # every finding in the report rather than every wildcard grant.
+    if not value:
+        return False
+    if pattern.endswith("*"):
+        return value.startswith(pattern[:-1])
+    return pattern == value
+
+
+def apply_ignores(findings, rules):
+    """Split findings into (kept, suppressed) and mark which rules fired.
+
+    A rule matches when every field it names matches the finding. Fields it
+    does not name are not constraints — `verb=*` alone suppresses every
+    wildcard finding, `role=x verb=*` only that role's.
+    """
+    kept, suppressed = [], []
+    for rule in rules:
+        # Accumulate across calls: this runs once per section, and a rule that
+        # fired in an earlier one is not stale.
+        rule.setdefault("hits", 0)
+    for f in findings:
+        hit = None
+        for rule in rules:
+            if all(
+                _matches(rule[k], f[k])
+                for k in ("subject", "role", "verb")
+                if k in rule
+            ):
+                hit = rule
+                break
+        if hit:
+            hit["hits"] += 1
+            suppressed.append((f, hit))
+        else:
+            kept.append(f)
+    return kept, suppressed
+
+
+def load_ignores(path=IGNORE_FILE):
+    try:
+        with open(path) as fh:
+            return parse_ignore(fh.read())
+    except FileNotFoundError:
+        return []
+
+
+def sections_for(snap):
+    return [
         ("Wildcard grants", list(wildcard_findings(snap))),
         ("cluster-admin bindings", list(cluster_admin_findings(snap))),
         ("Unused ServiceAccounts", list(unused_sa_findings(snap))),
         ("Dangling bindings", list(dangling_binding_findings(snap))),
     ]
-    total = 0
-    for title, findings in sections:
-        print(f"## {title} ({len(findings)})\n")
-        for f in findings:
-            print(f"- {f}")
+
+
+def report(snap, rules=()):
+    """Print the markdown report; return the number of UNSUPPRESSED findings.
+
+    Suppressed ones are counted and listed, never silently dropped: an ignore
+    file you cannot audit is a way to lose findings, not a way to manage them.
+    """
+    print(f"# RBAC audit — {snap['taken_at']}\n")
+    rules = list(rules)
+    total, all_suppressed = 0, []
+    for title, findings in sections_for(snap):
+        kept, suppressed = apply_ignores(findings, rules)
+        all_suppressed.extend(suppressed)
+        note = f" ({len(suppressed)} suppressed)" if suppressed else ""
+        print(f"## {title} ({len(kept)}){note}\n")
+        for f in kept:
+            print(f"- {f['text']}")
         print()
-        total += len(findings)
+        total += len(kept)
+
+    if all_suppressed:
+        print(f"## Suppressed ({len(all_suppressed)})\n")
+        for f, rule in all_suppressed:
+            print(f"- {f['text']} — _{rule['reason']}_")
+        print()
+
+    stale = [r for r in rules if not r["hits"]]
+    if stale:
+        print(f"## Stale suppressions ({len(stale)})\n")
+        for r in stale:
+            print(f"- {IGNORE_FILE}:{r['line']}: `{r['raw']}` matched nothing")
+        print()
+
     print("## Inventory\n")
     for kind in (
         "roles",
@@ -129,7 +305,8 @@ def report(snap):
         "serviceaccounts",
     ):
         print(f"- {kind}: {len(snap[kind])}")
-    print(f"\n**{total} findings.**")
+    suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
+    print(f"\n**{total} findings.**{suffix}")
     return total
 
 
@@ -206,20 +383,19 @@ def _md_code_to_html(text):
     )
 
 
-def html_report(snap, identity=None):
+def html_report(snap, identity=None, rules=()):
     """Render the same findings as a self-contained HTML document.
 
-    The sections are rebuilt here rather than shared with report(): that one
-    prints as it goes, and threading a writer through it to serve two formats
-    would complicate the common path for the benefit of the rarer one.
+    Only the rendering is separate from report(): the sections and the
+    suppressions come from the same helpers, so the two formats cannot
+    disagree about what was found or what was ignored.
     """
     identity = identity or {"context": "unknown", "server": "unknown"}
-    sections = [
-        ("Wildcard grants", list(wildcard_findings(snap))),
-        ("cluster-admin bindings", list(cluster_admin_findings(snap))),
-        ("Unused ServiceAccounts", list(unused_sa_findings(snap))),
-        ("Dangling bindings", list(dangling_binding_findings(snap))),
-    ]
+    sections, all_suppressed = [], []
+    for title, findings in sections_for(snap):
+        kept, suppressed = apply_ignores(findings, rules)
+        all_suppressed.extend(suppressed)
+        sections.append((title, kept, suppressed))
     out = [
         "<!doctype html>",
         '<html lang="en"><head><meta charset="utf-8">',
@@ -236,15 +412,28 @@ def html_report(snap, identity=None):
     ]
 
     total = 0
-    for title, findings in sections:
-        out.append(f'<h2>{esc(title)} <span class="count">{len(findings)}</span></h2>')
-        if findings:
+    for title, kept, suppressed in sections:
+        note = f" ({len(suppressed)} suppressed)" if suppressed else ""
+        out.append(
+            f'<h2>{esc(title)} <span class="count">{len(kept)}</span>{esc(note)}</h2>'
+        )
+        if kept:
             out.append("<ul>")
-            out += [f"<li>{_md_code_to_html(f)}</li>" for f in findings]
+            out += [f"<li>{_md_code_to_html(f['text'])}</li>" for f in kept]
             out.append("</ul>")
         else:
             out.append('<p class="none">None.</p>')
-        total += len(findings)
+        total += len(kept)
+
+    if all_suppressed:
+        out.append(
+            f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>'
+        )
+        out += [
+            f"<li>{_md_code_to_html(f['text'])} — <em>{esc(rule['reason'])}</em></li>"
+            for f, rule in all_suppressed
+        ]
+        out.append("</ul>")
 
     out.append("<h2>Inventory</h2><table><tbody>")
     for kind in (
@@ -257,7 +446,8 @@ def html_report(snap, identity=None):
         out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
     out.append("</tbody></table>")
 
-    out.append(f"<footer><strong>{total} findings.</strong><br>")
+    suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
+    out.append(f"<footer><strong>{total} findings.</strong>{esc(suffix)}<br>")
     out.append(
         "This report enumerates who can do what in the cluster. Treat it as "
         "sensitive: it is a map of the permissions worth attacking."
@@ -348,15 +538,24 @@ def main():
     if cmd == "dump":
         json.dump(snapshot(), sys.stdout, indent=2)
     elif cmd == "report":
+        path = IGNORE_FILE
+        if "--ignore-file" in sys.argv:
+            path = sys.argv[sys.argv.index("--ignore-file") + 1]
+        try:
+            rules = load_ignores(path)
+        except IgnoreError as err:
+            sys.exit(str(err))
         snap = snapshot()
-        findings = report(snap)
+        # Suppressed findings never reach this count, so the exit code reflects
+        # what is left to act on — which is the point of suppressing.
+        findings = report(snap, rules)
 
-        # Written from the same snapshot as the markdown above, so the two
-        # cannot disagree about what was found.
+        # Written from the same snapshot and the same suppressions as the
+        # markdown above, so the two cannot disagree about what was found.
         if "--html" in sys.argv:
             out = sys.argv[sys.argv.index("--html") + 1]
             with open(out, "w") as fh:
-                fh.write(html_report(snap, cluster_identity()))
+                fh.write(html_report(snap, cluster_identity(), rules))
             print(f"\nHTML report written to {out}", file=sys.stderr)
             if "--s3" in sys.argv:
                 sse = "AES256"

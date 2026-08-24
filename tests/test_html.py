@@ -99,6 +99,13 @@ class HTMLReportTest(unittest.TestCase):
     def test_empty_section_says_none(self):
         self.assertIn('<p class="none">None.</p>', self.render())
 
+    def test_suppressions_apply_and_are_listed(self):
+        rules = ra.parse_ignore("role=admin reason=ships with Kubernetes")
+        html = ra.html_report(SNAP, None, rules)
+        self.assertIn("<strong>1 findings.</strong> (1 suppressed)", html)
+        self.assertIn("(1 suppressed)</h2>", html)
+        self.assertIn("<em>ships with Kubernetes</em>", html)
+
 
 class UploadTest(unittest.TestCase):
     def test_builds_the_expected_command(self):
