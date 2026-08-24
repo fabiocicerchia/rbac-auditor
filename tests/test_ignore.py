@@ -84,6 +84,14 @@ class MatchTest(unittest.TestCase):
         kept, _ = ra.apply_ignores(self.findings(), rules)
         self.assertNotIn("unused sa", [f["text"] for f in kept])
 
+    def test_hits_survive_the_next_section(self):
+        # report() calls apply_ignores once per section; a rule that fired in an
+        # earlier one must not come back as stale.
+        rules = ra.parse_ignore("role=admin reason=accepted\n")
+        ra.apply_ignores(self.findings(), rules)
+        ra.apply_ignores([ra.finding("unrelated", role="other")], rules)
+        self.assertTrue(rules[0]["hits"])
+
     def test_rule_matching_nothing_is_stale(self):
         rules = ra.parse_ignore("role=nonexistent reason=left over\n")
         kept, suppressed = ra.apply_ignores(self.findings(), rules)
