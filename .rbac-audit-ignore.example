@@ -1,0 +1,20 @@
+# .rbac-audit-ignore — accepted findings, so real ones stay visible.
+#
+# One rule per line: field=value pairs, `#` starts a comment.
+# Fields: subject, role, verb. A value ending in `*` matches a prefix.
+# reason= is required and swallows the rest of the line.
+#
+# A rule only constrains the fields it names, and a field the finding does not
+# have never matches — `verb=*` covers every wildcard grant, not every finding.
+#
+# Suppressed findings are still listed under "Suppressed" in the report, and a
+# rule that matches nothing is reported as stale. Nothing disappears quietly.
+
+# The kube-system bootstrap accounts are not ours to fix.
+subject=ServiceAccount:kube-system/* reason=cluster bootstrap, upstream-managed
+
+# Break-glass access, reviewed 2026-08, expires with the next audit.
+role=cluster-admin reason=break-glass account, reviewed 2026-08
+
+# Controllers that ship with Kubernetes and legitimately hold wildcards.
+role=system:controller:* verb=* reason=upstream controller manager

@@ -156,3 +156,35 @@ make lint      # hadolint + py_compile
 make test      # help text renders, kubectl present, script compiles
 make release   # multi-arch buildx push
 ```
+
+## Suppressing accepted findings
+
+Accepted risks otherwise reappear on every run until the real findings are lost
+in them. A `.rbac-audit-ignore` next to the report (or `--ignore-file PATH`)
+suppresses findings by `subject`, `role` or `verb`:
+
+```
+# The kube-system bootstrap accounts are not ours to fix.
+subject=ServiceAccount:kube-system/* reason=cluster bootstrap, upstream-managed
+
+# Break-glass access, reviewed 2026-08.
+role=cluster-admin reason=break-glass account, reviewed 2026-08
+```
+
+`reason=` is required — an accepted risk with no stated reason is
+indistinguishable from a mistake six months later. A value ending in `*`
+matches a prefix, and a rule only constrains the fields it names.
+
+Nothing disappears quietly:
+
+- suppressed findings are counted per section and listed under **Suppressed**,
+  each with its reason
+- a rule that matches nothing is reported under **Stale suppressions**, so the
+  file can be pruned as the cluster changes
+- the exit code reflects the findings that are *left* — `--fail-on-findings`
+  still fails the build for anything unsuppressed
+
+A malformed entry is a fatal error rather than a warning: a suppression nobody
+can read hides findings without saying so.
+
+See [`.rbac-audit-ignore.example`](../.rbac-audit-ignore.example).
