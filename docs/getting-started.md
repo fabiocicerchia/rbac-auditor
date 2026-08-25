@@ -187,7 +187,7 @@ Nothing disappears quietly:
 A malformed entry is a fatal error rather than a warning: a suppression nobody
 can read hides findings without saying so.
 
-See [`.rbac-audit-ignore.example`](../.rbac-audit-ignore.example).
+See [`.rbac-audit-ignore.example`](https://github.com/fabiocicerchia/rbac-auditor/blob/main/.rbac-audit-ignore.example).
 
 ## HTML reports
 
