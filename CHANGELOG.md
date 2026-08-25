@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.1.0...v1.2.0) (2026-08-25)
+
+
+### Features
+
+* **docs:** build the docs site in Actions and drop Read the Docs ([#38](https://github.com/fabiocicerchia/rbac-auditor/issues/38)) ([b4ace9f](https://github.com/fabiocicerchia/rbac-auditor/commit/b4ace9fff49aabdcb60340ce9a7783615d333c40))
+
 ## [1.1.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.0.1...v1.1.0) (2026-08-24)
 
 
