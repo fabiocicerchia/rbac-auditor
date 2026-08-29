@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.2.0...v1.2.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* unblock quality and clear the Scorecard pinned-dependencies finding ([#40](https://github.com/fabiocicerchia/rbac-auditor/issues/40)) ([3116467](https://github.com/fabiocicerchia/rbac-auditor/commit/31164679e53c98b45f9742ddb496e3badc9f3d9e))
+
 ## [1.2.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.1.0...v1.2.0) (2026-08-25)
 
 
