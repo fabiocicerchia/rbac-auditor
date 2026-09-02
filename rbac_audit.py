@@ -278,6 +278,22 @@ def sections_for(snap):
     ]
 
 
+def audited_sections(snap, rules):
+    """Every section as (title, kept, suppressed), with the ignore rules applied.
+
+    Both renderers say in their own docstring that the two formats cannot
+    disagree about what was found or what was ignored. This is the sentence
+    made structural: there is one place that decides, and neither renderer
+    calls apply_ignores itself.
+    """
+    sections, all_suppressed = [], []
+    for title, findings in sections_for(snap):
+        kept, suppressed = apply_ignores(findings, rules)
+        all_suppressed.extend(suppressed)
+        sections.append((title, kept, suppressed))
+    return sections, all_suppressed
+
+
 def report(snap, rules=()):
     """Print the markdown report; return the number of UNSUPPRESSED findings.
 
@@ -286,10 +302,9 @@ def report(snap, rules=()):
     """
     print(f"# RBAC audit — {snap['taken_at']}\n")
     rules = list(rules)
-    total, all_suppressed = 0, []
-    for title, findings in sections_for(snap):
-        kept, suppressed = apply_ignores(findings, rules)
-        all_suppressed.extend(suppressed)
+    sections, all_suppressed = audited_sections(snap, rules)
+    total = 0
+    for title, kept, suppressed in sections:
         note = f" ({len(suppressed)} suppressed)" if suppressed else ""
         print(f"## {title} ({len(kept)}){note}\n")
         for f in kept:
@@ -399,11 +414,7 @@ def html_report(snap, identity=None, rules=()):
     disagree about what was found or what was ignored.
     """
     identity = identity or {"context": "unknown", "server": "unknown"}
-    sections, all_suppressed = [], []
-    for title, findings in sections_for(snap):
-        kept, suppressed = apply_ignores(findings, rules)
-        all_suppressed.extend(suppressed)
-        sections.append((title, kept, suppressed))
+    sections, all_suppressed = audited_sections(snap, rules)
     out = [
         "<!doctype html>",
         '<html lang="en"><head><meta charset="utf-8">',
@@ -535,14 +546,21 @@ def who_can(verb, resource, snap):
                     )
 
 
+def flag_value(argv, flag, default=None):
+    """The token after `flag`, or `default` when the flag is not there.
+
+    Four flags took their argument by hand with the same index arithmetic; one
+    of them off by one is a wrong file read with no error.
+    """
+    return argv[argv.index(flag) + 1] if flag in argv else default
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "dump":
         json.dump(snapshot(), sys.stdout, indent=2)
     elif cmd == "report":
-        path = IGNORE_FILE
-        if "--ignore-file" in sys.argv:
-            path = sys.argv[sys.argv.index("--ignore-file") + 1]
+        path = flag_value(sys.argv, "--ignore-file", IGNORE_FILE)
         try:
             rules = load_ignores(path)
         except IgnoreError as err:
@@ -555,15 +573,13 @@ def main():
         # Written from the same snapshot and the same suppressions as the
         # markdown above, so the two cannot disagree about what was found.
         if "--html" in sys.argv:
-            out = sys.argv[sys.argv.index("--html") + 1]
+            out = flag_value(sys.argv, "--html")
             with open(out, "w") as fh:
                 fh.write(html_report(snap, cluster_identity(), rules))
             print(f"\nHTML report written to {out}", file=sys.stderr)
             if "--s3" in sys.argv:
-                sse = DEFAULT_SSE
-                if "--sse" in sys.argv:
-                    sse = sys.argv[sys.argv.index("--sse") + 1]
-                err = upload_s3(out, sys.argv[sys.argv.index("--s3") + 1], sse)
+                sse = flag_value(sys.argv, "--sse", DEFAULT_SSE)
+                err = upload_s3(out, flag_value(sys.argv, "--s3"), sse)
                 if err:
                     # Delivery failed, the audit did not: keep the local file
                     # and the exit code the findings earned.
