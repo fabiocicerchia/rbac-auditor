@@ -5,6 +5,7 @@ no test framework in it and this is not worth adding one for.
 """
 
 import io
+import logging
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import rbac_audit as ra
+
+# Diagnostics driven on purpose below stay out of the suite's own output;
+# assertLogs still sees the records.
+ra.log.addHandler(logging.NullHandler())
+ra.log.propagate = False
 
 SNAP = {
     "taken_at": "2026-08-15T09:00:00+00:00",

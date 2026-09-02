@@ -46,6 +46,16 @@ DEFAULT_SERVICE_ACCOUNT = "default"
 # S3 server-side encryption when --sse is not given.
 DEFAULT_SSE = "AES256"
 
+# Exit codes, sysexits(3) names in the comments. 2 is not a sysexits code and
+# is not free to move: docs/architecture.md documents `report --fail-on-findings`
+# exiting 2, and CI gates are written against it.
+EXIT_OK = 0
+EXIT_FINDINGS = 2  # findings remain and --fail-on-findings was passed
+EXIT_USAGE = 64  # EX_USAGE     — missing operand, flag without a value
+EXIT_DATAERR = 65  # EX_DATAERR   — a file that cannot be parsed
+EXIT_NOINPUT = 66  # EX_NOINPUT   — a file named on the command line is missing
+EXIT_UNAVAILABLE = 69  # EX_UNAVAILABLE — kubectl could not reach the cluster
+
 
 def kubectl_json(*args):
     proc = subprocess.run(
@@ -56,7 +66,7 @@ def kubectl_json(*args):
     )
     if proc.returncode:
         log.error("kubectl get %s failed: %s", " ".join(args), proc.stderr.strip())
-        sys.exit(1)
+        sys.exit(EXIT_UNAVAILABLE)
     return json.loads(proc.stdout)["items"]
 
 
@@ -611,9 +621,33 @@ def flag_value(argv, flag, default=None):
     """The token after `flag`, or `default` when the flag is not there.
 
     Four flags took their argument by hand with the same index arithmetic; one
-    of them off by one is a wrong file read with no error.
+    of them off by one is a wrong file read with no error. Exits EX_USAGE when
+    the flag is last on the line, rather than raising IndexError at the user.
     """
-    return argv[argv.index(flag) + 1] if flag in argv else default
+    if flag not in argv:
+        return default
+    try:
+        return argv[argv.index(flag) + 1]
+    except IndexError:
+        log.error("%s needs a value", flag)
+        sys.exit(EXIT_USAGE)
+
+
+def load_snapshot(path):
+    """A previous `dump`, read back for `diff`.
+
+    Exits rather than raising: a snapshot that is missing or is not JSON is
+    something the user can fix, and a traceback does not tell them what.
+    """
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except OSError as err:
+        log.error("cannot read %s: %s", path, err)
+        sys.exit(EXIT_NOINPUT)
+    except json.JSONDecodeError as err:
+        log.error("%s is not a JSON snapshot: %s", path, err)
+        sys.exit(EXIT_DATAERR)
 
 
 def deliver_html(argv, snap, rules):
@@ -639,7 +673,7 @@ def run_report(argv):
         rules = load_ignores(path)
     except IgnoreError as err:
         log.error("%s", err)
-        sys.exit(1)
+        sys.exit(EXIT_DATAERR)
     snap = snapshot()
     # Suppressed findings never reach this count, so the exit code reflects
     # what is left to act on — which is the point of suppressing.
@@ -651,7 +685,7 @@ def run_report(argv):
         deliver_html(argv, snap, rules)
 
     gating_on_findings = "--fail-on-findings" in argv
-    sys.exit(2 if findings and gating_on_findings else 0)
+    sys.exit(EXIT_FINDINGS if findings and gating_on_findings else EXIT_OK)
 
 
 def main():
@@ -664,13 +698,18 @@ def main():
     elif cmd == "report":
         run_report(sys.argv)
     elif cmd == "diff":
-        with open(sys.argv[2]) as fh:
-            diff(json.load(fh), snapshot())
+        if len(sys.argv) < 3:
+            log.error("usage: rbac-audit diff OLD.json")
+            sys.exit(EXIT_USAGE)
+        diff(load_snapshot(sys.argv[2]), snapshot())
     elif cmd == "who-can":
+        if len(sys.argv) < 4:
+            log.error("usage: rbac-audit who-can VERB RESOURCE")
+            sys.exit(EXIT_USAGE)
         who_can(sys.argv[2], sys.argv[3], snapshot())
     else:
         print(__doc__)
-        sys.exit(64)
+        sys.exit(EXIT_USAGE)
 
 
 if __name__ == "__main__":
