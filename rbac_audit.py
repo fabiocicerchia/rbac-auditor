@@ -297,6 +297,27 @@ def audited_sections(snap, rules):
     return sections, all_suppressed
 
 
+def print_suppressed_section(all_suppressed):
+    """What was hidden, and on whose authority. Nothing disappears quietly."""
+    if not all_suppressed:
+        return
+    print(f"## Suppressed ({len(all_suppressed)})\n")
+    for f, rule in all_suppressed:
+        print(f"- {f['text']} — _{rule['reason']}_")
+    print()
+
+
+def print_stale_section(rules):
+    """Rules that matched nothing — an ignore file rots the same as code."""
+    stale = [r for r in rules if not r["hits"]]
+    if not stale:
+        return
+    print(f"## Stale suppressions ({len(stale)})\n")
+    for r in stale:
+        print(f"- {IGNORE_FILE}:{r['line']}: `{r['raw']}` matched nothing")
+    print()
+
+
 def report(snap, rules=()):
     """Print the markdown report; return the number of UNSUPPRESSED findings.
 
@@ -315,18 +336,8 @@ def report(snap, rules=()):
         print()
         total += len(kept)
 
-    if all_suppressed:
-        print(f"## Suppressed ({len(all_suppressed)})\n")
-        for f, rule in all_suppressed:
-            print(f"- {f['text']} — _{rule['reason']}_")
-        print()
-
-    stale = [r for r in rules if not r["hits"]]
-    if stale:
-        print(f"## Stale suppressions ({len(stale)})\n")
-        for r in stale:
-            print(f"- {IGNORE_FILE}:{r['line']}: `{r['raw']}` matched nothing")
-        print()
+    print_suppressed_section(all_suppressed)
+    print_stale_section(rules)
 
     print("## Inventory\n")
     for kind in INVENTORY_KINDS:
@@ -414,16 +425,11 @@ def _md_code_to_html(text):
     )
 
 
-def html_report(snap, identity=None, rules=()):
-    """Render the same findings as a self-contained HTML document.
-
-    Only the rendering is separate from report(): the sections and the
-    suppressions come from the same helpers, so the two formats cannot
-    disagree about what was found or what was ignored.
+def html_head(snap, identity):
+    """Everything before the first finding: the document head and the header
+    table saying which cluster, which API server and when.
     """
-    identity = identity or {"context": "unknown", "server": "unknown"}
-    sections, all_suppressed = audited_sections(snap, rules)
-    out = [
+    return [
         "<!doctype html>",
         '<html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -438,6 +444,39 @@ def html_report(snap, identity=None, rules=()):
         "</tbody></table>",
     ]
 
+
+def html_suppressed(all_suppressed):
+    """The suppressed list, each finding with the reason that hid it."""
+    if not all_suppressed:
+        return []
+    out = [f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>']
+    for f, rule in all_suppressed:
+        text = _md_code_to_html(f["text"])
+        out.append(f"<li>{text} — <em>{escape_html(rule['reason'])}</em></li>")
+    out.append("</ul>")
+    return out
+
+
+def html_inventory(snap):
+    """How many of each kind the snapshot held."""
+    out = ["<h2>Inventory</h2><table><tbody>"]
+    for kind in INVENTORY_KINDS:
+        out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
+    out.append("</tbody></table>")
+    return out
+
+
+def html_report(snap, identity=None, rules=()):
+    """Render the same findings as a self-contained HTML document.
+
+    Only the rendering is separate from report(): the sections and the
+    suppressions come from the same helpers, so the two formats cannot
+    disagree about what was found or what was ignored.
+    """
+    identity = identity or {"context": "unknown", "server": "unknown"}
+    sections, all_suppressed = audited_sections(snap, rules)
+    out = html_head(snap, identity)
+
     total = 0
     for title, kept, suppressed in sections:
         note = f" ({len(suppressed)} suppressed)" if suppressed else ""
@@ -446,26 +485,16 @@ def html_report(snap, identity=None, rules=()):
         )
         if kept:
             out.append("<ul>")
-            out += [f"<li>{_md_code_to_html(f['text'])}</li>" for f in kept]
+            for f in kept:
+                text = _md_code_to_html(f["text"])
+                out.append(f"<li>{text}</li>")
             out.append("</ul>")
         else:
             out.append('<p class="none">None.</p>')
         total += len(kept)
 
-    if all_suppressed:
-        out.append(
-            f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>'
-        )
-        out += [
-            f"<li>{_md_code_to_html(f['text'])} — <em>{escape_html(rule['reason'])}</em></li>"
-            for f, rule in all_suppressed
-        ]
-        out.append("</ul>")
-
-    out.append("<h2>Inventory</h2><table><tbody>")
-    for kind in INVENTORY_KINDS:
-        out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
-    out.append("</tbody></table>")
+    out += html_suppressed(all_suppressed)
+    out += html_inventory(snap)
 
     suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
     out.append(f"<footer><strong>{total} findings.</strong>{escape_html(suffix)}<br>")
@@ -531,20 +560,25 @@ def rule_grants(rule, verb, resource):
     )
 
 
-def who_can(verb, resource, snap):
-    granting = set()
-    for kind in ROLE_KINDS:
-        for role in snap[kind]:
-            rules = role.get("rules") or []
-            if any(rule_grants(rule, verb, resource) for rule in rules):
-                granting.add(
-                    (
-                        kind[:-1]
-                        .replace("role", "Role")
-                        .replace("clusterRole", "ClusterRole"),
-                        qualified_name(role),
-                    )
-                )
+def granting_role_names(snap, verb, resource):
+    """Qualified names of the roles whose rules allow `verb` on `resource`.
+
+    Does not resolve `aggregationRule`, so this is a lower bound — see
+    docs/architecture.md, "What `who-can` does not do".
+    """
+    return {
+        qualified_name(role)
+        for kind in ROLE_KINDS
+        for role in snap[kind]
+        if any(rule_grants(rule, verb, resource) for rule in role.get("rules") or [])
+    }
+
+
+def subjects_bound_to(snap, role_names):
+    """Yield `Kind namespace/name` for every subject of a binding that
+    references one of `role_names`. Not deduplicated: two bindings granting the
+    same subject is two lines, because it is two grants to revoke.
+    """
     for kind in BINDING_KINDS:
         for binding in snap[kind]:
             ref = binding.get("roleRef", {})
@@ -552,17 +586,19 @@ def who_can(verb, resource, snap):
             # binding's own namespace, so both spellings have to be tried.
             binding_ns = binding["metadata"].get("namespace", "")
             namespaced = f"{binding_ns}/{ref.get('name', '')}".lstrip("/")
-            refers_to_granting_role = any(
-                granting_name in (ref.get("name"), namespaced)
-                for _, granting_name in granting
-            )
-            if refers_to_granting_role:
-                for subject in binding.get("subjects") or []:
-                    kind_ns_name = (
-                        f"{subject.get('kind')} "
-                        f"{subject.get('namespace', '')}/{subject.get('name')}"
-                    )
-                    print(kind_ns_name.replace(" /", " "))
+            if not role_names & {ref.get("name"), namespaced}:
+                continue
+            for subject in binding.get("subjects") or []:
+                kind_ns_name = (
+                    f"{subject.get('kind')} "
+                    f"{subject.get('namespace', '')}/{subject.get('name')}"
+                )
+                yield kind_ns_name.replace(" /", " ")
+
+
+def who_can(verb, resource, snap):
+    for line in subjects_bound_to(snap, granting_role_names(snap, verb, resource)):
+        print(line)
 
 
 def flag_value(argv, flag, default=None):
@@ -574,41 +610,51 @@ def flag_value(argv, flag, default=None):
     return argv[argv.index(flag) + 1] if flag in argv else default
 
 
+def deliver_html(argv, snap, rules):
+    """Write the HTML report where --html asked, and upload it if --s3 did."""
+    out = flag_value(argv, "--html")
+    with open(out, "w") as fh:
+        fh.write(html_report(snap, cluster_identity(), rules))
+    print(f"\nHTML report written to {out}", file=sys.stderr)
+    if "--s3" not in argv:
+        return
+    sse = flag_value(argv, "--sse", DEFAULT_SSE)
+    upload_error = upload_s3(out, flag_value(argv, "--s3"), sse)
+    if upload_error:
+        # Delivery failed, the audit did not: keep the local file and the exit
+        # code the findings earned.
+        print(
+            f"warning: S3 upload failed ({upload_error}); {out} kept", file=sys.stderr
+        )
+
+
+def run_report(argv):
+    """The `report` subcommand. Never returns: it exits with the verdict."""
+    path = flag_value(argv, "--ignore-file", IGNORE_FILE)
+    try:
+        rules = load_ignores(path)
+    except IgnoreError as err:
+        sys.exit(str(err))
+    snap = snapshot()
+    # Suppressed findings never reach this count, so the exit code reflects
+    # what is left to act on — which is the point of suppressing.
+    findings = report(snap, rules)
+
+    # Written from the same snapshot and the same suppressions as the markdown
+    # above, so the two cannot disagree about what was found.
+    if "--html" in argv:
+        deliver_html(argv, snap, rules)
+
+    gating_on_findings = "--fail-on-findings" in argv
+    sys.exit(2 if findings and gating_on_findings else 0)
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "dump":
         json.dump(snapshot(), sys.stdout, indent=2)
     elif cmd == "report":
-        path = flag_value(sys.argv, "--ignore-file", IGNORE_FILE)
-        try:
-            rules = load_ignores(path)
-        except IgnoreError as err:
-            sys.exit(str(err))
-        snap = snapshot()
-        # Suppressed findings never reach this count, so the exit code reflects
-        # what is left to act on — which is the point of suppressing.
-        findings = report(snap, rules)
-
-        # Written from the same snapshot and the same suppressions as the
-        # markdown above, so the two cannot disagree about what was found.
-        if "--html" in sys.argv:
-            out = flag_value(sys.argv, "--html")
-            with open(out, "w") as fh:
-                fh.write(html_report(snap, cluster_identity(), rules))
-            print(f"\nHTML report written to {out}", file=sys.stderr)
-            if "--s3" in sys.argv:
-                sse = flag_value(sys.argv, "--sse", DEFAULT_SSE)
-                upload_error = upload_s3(out, flag_value(sys.argv, "--s3"), sse)
-                if upload_error:
-                    # Delivery failed, the audit did not: keep the local file
-                    # and the exit code the findings earned.
-                    print(
-                        f"warning: S3 upload failed ({upload_error}); {out} kept",
-                        file=sys.stderr,
-                    )
-
-        gating_on_findings = "--fail-on-findings" in sys.argv
-        sys.exit(2 if findings and gating_on_findings else 0)
+        run_report(sys.argv)
     elif cmd == "diff":
         with open(sys.argv[2]) as fh:
             diff(json.load(fh), snapshot())
