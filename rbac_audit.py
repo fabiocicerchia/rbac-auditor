@@ -339,6 +339,18 @@ def report(snap, rules=()):
 # --- HTML report -------------------------------------------------------------
 
 
+def kubectl_text(*args):
+    """kubectl's stdout, or "" if it failed.
+
+    The counterpart to kubectl_json: this one is for questions the report can
+    do without, so a failure is an empty answer rather than an exit.
+    """
+    proc = subprocess.run(
+        ["kubectl", *args], capture_output=True, text=True, check=False
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def cluster_identity():
     """Which cluster this is, for the report header.
 
@@ -348,16 +360,9 @@ def cluster_identity():
     differently. Best effort — a report is still worth having when kubectl
     cannot say, so this degrades to "unknown" rather than failing the run.
     """
-
-    def kubectl(*args):
-        proc = subprocess.run(
-            ["kubectl", *args], capture_output=True, text=True, check=False
-        )
-        return proc.stdout.strip() if proc.returncode == 0 else ""
-
-    context = kubectl("config", "current-context") or "unknown"
+    context = kubectl_text("config", "current-context") or "unknown"
     server = ""
-    raw = kubectl("config", "view", "--minify", "-o", "json")
+    raw = kubectl_text("config", "view", "--minify", "-o", "json")
     if raw:
         try:
             clusters = json.loads(raw).get("clusters") or []
@@ -494,18 +499,20 @@ def upload_s3(path, destination, sse=DEFAULT_SSE):
     return None
 
 
-def diff(old, new):
-    def index(snap):
-        out = {}
-        for kind in ROLE_KINDS + BINDING_KINDS:
-            for obj in snap[kind]:
-                # A role carries rules, a binding carries subjects; either one
-                # changing is what "~ changed" means.
-                content = obj.get("rules") or obj.get("subjects")
-                out[(kind, qualified_name(obj))] = content
-        return out
+def index_by_kind(snap):
+    """{(kind, qualified name): the part of it a diff cares about}."""
+    out = {}
+    for kind in ROLE_KINDS + BINDING_KINDS:
+        for obj in snap[kind]:
+            # A role carries rules, a binding carries subjects; either one
+            # changing is what "~ changed" means.
+            content = obj.get("rules") or obj.get("subjects")
+            out[(kind, qualified_name(obj))] = content
+    return out
 
-    was, now = index(old), index(new)
+
+def diff(old, new):
+    was, now = index_by_kind(old), index_by_kind(new)
     for key in sorted(now.keys() - was.keys()):
         print(f"+ added   {key[0][:-1]} {key[1]}")
     for key in sorted(was.keys() - now.keys()):
@@ -515,18 +522,21 @@ def diff(old, new):
             print(f"~ changed {key[0][:-1]} {key[1]}")
 
 
-def who_can(verb, resource, snap):
-    def rule_matches(rule):
-        verbs = rule.get("verbs") or []
-        resources = rule.get("resources") or []
-        return ("*" in verbs or verb in verbs) and (
-            "*" in resources or resource in resources
-        )
+def rule_grants(rule, verb, resource):
+    """Whether one policy rule allows `verb` on `resource`, `*` included."""
+    verbs = rule.get("verbs") or []
+    resources = rule.get("resources") or []
+    return ("*" in verbs or verb in verbs) and (
+        "*" in resources or resource in resources
+    )
 
+
+def who_can(verb, resource, snap):
     granting = set()
     for kind in ROLE_KINDS:
         for role in snap[kind]:
-            if any(rule_matches(rule) for rule in role.get("rules") or []):
+            rules = role.get("rules") or []
+            if any(rule_grants(rule, verb, resource) for rule in rules):
                 granting.add(
                     (
                         kind[:-1]
