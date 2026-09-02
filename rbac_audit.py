@@ -18,10 +18,15 @@ Findings covered by `report`:
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+
+# Diagnostics go here; the report itself goes to stdout, so the two can be
+# redirected apart — `report > audit.md` has to stay a clean markdown file.
+log = logging.getLogger("rbac-audit")
 
 IGNORE_FILE = ".rbac-audit-ignore"
 
@@ -50,7 +55,8 @@ def kubectl_json(*args):
         check=False,  # returncode is inspected below, so a raise would skip the message
     )
     if proc.returncode:
-        sys.exit(f"kubectl get {' '.join(args)} failed:\n{proc.stderr.strip()}")
+        log.error("kubectl get %s failed: %s", " ".join(args), proc.stderr.strip())
+        sys.exit(1)
     return json.loads(proc.stdout)["items"]
 
 
@@ -615,7 +621,7 @@ def deliver_html(argv, snap, rules):
     out = flag_value(argv, "--html")
     with open(out, "w") as fh:
         fh.write(html_report(snap, cluster_identity(), rules))
-    print(f"\nHTML report written to {out}", file=sys.stderr)
+    log.info("HTML report written to %s", out)
     if "--s3" not in argv:
         return
     sse = flag_value(argv, "--sse", DEFAULT_SSE)
@@ -623,9 +629,7 @@ def deliver_html(argv, snap, rules):
     if upload_error:
         # Delivery failed, the audit did not: keep the local file and the exit
         # code the findings earned.
-        print(
-            f"warning: S3 upload failed ({upload_error}); {out} kept", file=sys.stderr
-        )
+        log.warning("S3 upload failed (%s); %s kept", upload_error, out)
 
 
 def run_report(argv):
@@ -634,7 +638,8 @@ def run_report(argv):
     try:
         rules = load_ignores(path)
     except IgnoreError as err:
-        sys.exit(str(err))
+        log.error("%s", err)
+        sys.exit(1)
     snap = snapshot()
     # Suppressed findings never reach this count, so the exit code reflects
     # what is left to act on — which is the point of suppressing.
@@ -650,6 +655,9 @@ def run_report(argv):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s: %(message)s", stream=sys.stderr
+    )
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "dump":
         json.dump(snapshot(), sys.stdout, indent=2)
