@@ -25,8 +25,10 @@ kubeconfig, an in-cluster ServiceAccount token, an exec plugin for EKS or GKE,
 a proxy — all of it works because kubectl handles it, not because this script
 does.
 
-The single dependency is PyYAML, and the image is `python:3.13-alpine` with a
-pinned kubectl copied in.
+The script itself imports nothing outside the standard library. The image is
+`python:3.14-alpine3.22`, pinned by digest, with a pinned kubectl copied in; it
+also installs PyYAML, which no module imports today — `grep -rn yaml
+rbac_audit.py tests/` finds nothing.
 
 ## The snapshot is the boundary
 
@@ -73,6 +75,20 @@ you ask for one — which matters because the first thing you do with a new
 findings tool is read it, and the second is decide which findings you are
 willing to block on.
 
+Everything else follows sysexits, so a CI job can tell "the cluster said no"
+from "you typed it wrong" without reading the message:
+
+| Code | When |
+|---|---|
+| 0 | success |
+| 2 | findings remain and `--fail-on-findings` was passed |
+| 64 | missing operand, or a flag given without its value |
+| 65 | the ignore file or the snapshot could not be parsed |
+| 66 | the snapshot named on the command line does not exist |
+| 69 | `kubectl` could not reach the cluster |
+
+The table lives in one place, at the top of `rbac_audit.py`.
+
 ## Permissions
 
 `manifests/cronjob.yaml` ships the ClusterRole it needs: `get` and `list` on
@@ -84,9 +100,13 @@ which is the point of shipping it rather than describing it.
 
 ## Adding a finding
 
-1. A generator function taking `snap` and yielding strings, next to the other
-   four.
-2. A row in the `sections` list in `report()`.
+1. A generator function taking `snap` and yielding `finding(...)` records, next
+   to the other four. The text is what a human reads; the `subject`, `role` and
+   `verb` fields are what a `.rbac-audit-ignore` rule matches on, so a finding
+   with none of them cannot be suppressed.
+2. A row in `sections_for()`. Both renderers walk it through
+   `audited_sections()`, so markdown and HTML pick the new section up together
+   and cannot disagree about it.
 3. It has to be a pure function of the snapshot — anything that needs its own
    API call breaks `diff` and the archived-dump workflow.
 
