@@ -43,15 +43,15 @@ DEFAULT_SSE = "AES256"
 
 
 def kubectl_json(*args):
-    p = subprocess.run(
+    proc = subprocess.run(
         ["kubectl", "get", *args, "-A", "-o", "json"],
         capture_output=True,
         text=True,
         check=False,  # returncode is inspected below, so a raise would skip the message
     )
-    if p.returncode:
-        sys.exit(f"kubectl get {' '.join(args)} failed:\n{p.stderr.strip()}")
-    return json.loads(p.stdout)["items"]
+    if proc.returncode:
+        sys.exit(f"kubectl get {' '.join(args)} failed:\n{proc.stderr.strip()}")
+    return json.loads(proc.stdout)["items"]
 
 
 def snapshot():
@@ -61,9 +61,10 @@ def snapshot():
     return snap
 
 
-def name(obj):
-    m = obj["metadata"]
-    return f"{m.get('namespace', '')}/{m['name']}".lstrip("/")
+def qualified_name(obj):
+    """`namespace/name`, or just `name` when the object is cluster-scoped."""
+    meta = obj["metadata"]
+    return f"{meta.get('namespace', '')}/{meta['name']}".lstrip("/")
 
 
 def finding(text, subject="", role="", verb=""):
@@ -84,26 +85,26 @@ def wildcard_findings(snap):
                     rule.get("resources") or []
                 ):
                     yield finding(
-                        f"`{name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources",
-                        role=name(role),
+                        f"`{qualified_name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources",
+                        role=qualified_name(role),
                         verb="*",
                     )
 
 
 def cluster_admin_findings(snap):
-    for b in snap["clusterrolebindings"]:
-        if b.get("roleRef", {}).get("name") == "cluster-admin":
+    for binding in snap["clusterrolebindings"]:
+        if binding.get("roleRef", {}).get("name") == "cluster-admin":
             subjects = (
                 ", ".join(
                     f"{s.get('kind')}:{s.get('namespace', '')}/{s.get('name')}".replace(
                         ":/", ":"
                     )
-                    for s in b.get("subjects") or []
+                    for s in binding.get("subjects") or []
                 )
                 or "(no subjects)"
             )
             yield finding(
-                f"clusterrolebinding `{b['metadata']['name']}` grants cluster-admin to {subjects}",
+                f"clusterrolebinding `{binding['metadata']['name']}` grants cluster-admin to {subjects}",
                 subject=subjects,
                 role="cluster-admin",
             )
@@ -112,10 +113,10 @@ def cluster_admin_findings(snap):
 def unused_sa_findings(snap):
     used = {
         (
-            p["metadata"]["namespace"],
-            p["spec"].get("serviceAccountName", DEFAULT_SERVICE_ACCOUNT),
+            pod["metadata"]["namespace"],
+            pod["spec"].get("serviceAccountName", DEFAULT_SERVICE_ACCOUNT),
         )
-        for p in snap["pods"]
+        for pod in snap["pods"]
     }
     for sa in snap["serviceaccounts"]:
         key = (sa["metadata"]["namespace"], sa["metadata"]["name"])
@@ -132,18 +133,20 @@ def dangling_binding_findings(snap):
         for sa in snap["serviceaccounts"]
     }
     for kind in BINDING_KINDS:
-        for b in snap[kind]:
-            for s in b.get("subjects") or []:
-                if s.get("kind") == "ServiceAccount":
+        for binding in snap[kind]:
+            for subject in binding.get("subjects") or []:
+                if subject.get("kind") == "ServiceAccount":
                     key = (
-                        s.get("namespace", b["metadata"].get("namespace", "")),
-                        s["name"],
+                        subject.get(
+                            "namespace", binding["metadata"].get("namespace", "")
+                        ),
+                        subject["name"],
                     )
                     if key not in sas:
                         yield finding(
-                            f"{kind[:-1]} `{name(b)}` references missing ServiceAccount `{key[0]}/{key[1]}`",
+                            f"{kind[:-1]} `{qualified_name(binding)}` references missing ServiceAccount `{key[0]}/{key[1]}`",
                             subject=f"ServiceAccount:{key[0]}/{key[1]}",
-                            role=b.get("roleRef", {}).get("name", ""),
+                            role=binding.get("roleRef", {}).get("name", ""),
                         )
 
 
@@ -347,10 +350,10 @@ def cluster_identity():
     """
 
     def kubectl(*args):
-        p = subprocess.run(
+        proc = subprocess.run(
             ["kubectl", *args], capture_output=True, text=True, check=False
         )
-        return p.stdout.strip() if p.returncode == 0 else ""
+        return proc.stdout.strip() if proc.returncode == 0 else ""
 
     context = kubectl("config", "current-context") or "unknown"
     server = ""
@@ -366,7 +369,7 @@ def cluster_identity():
     return {"context": context, "server": server or "unknown"}
 
 
-def esc(text):
+def escape_html(text):
     return (
         str(text)
         .replace("&", "&amp;")
@@ -400,7 +403,7 @@ footer { margin-top: 3rem; color: #666; font-size: .85rem; border-top: 1px solid
 
 def _md_code_to_html(text):
     """The finding strings carry markdown backticks; turn them into <code>."""
-    parts = esc(text).split("`")
+    parts = escape_html(text).split("`")
     return "".join(
         p if i % 2 == 0 else f"<code>{p}</code>" for i, p in enumerate(parts)
     )
@@ -424,9 +427,9 @@ def html_report(snap, identity=None, rules=()):
         "</head><body>",
         "<h1>RBAC audit</h1>",
         '<table class="meta"><tbody>',
-        f"<tr><td>Cluster</td><td><code>{esc(identity['context'])}</code></td></tr>",
-        f"<tr><td>API server</td><td><code>{esc(identity['server'])}</code></td></tr>",
-        f"<tr><td>Generated</td><td><code>{esc(snap['taken_at'])}</code></td></tr>",
+        f"<tr><td>Cluster</td><td><code>{escape_html(identity['context'])}</code></td></tr>",
+        f"<tr><td>API server</td><td><code>{escape_html(identity['server'])}</code></td></tr>",
+        f"<tr><td>Generated</td><td><code>{escape_html(snap['taken_at'])}</code></td></tr>",
         "</tbody></table>",
     ]
 
@@ -434,7 +437,7 @@ def html_report(snap, identity=None, rules=()):
     for title, kept, suppressed in sections:
         note = f" ({len(suppressed)} suppressed)" if suppressed else ""
         out.append(
-            f'<h2>{esc(title)} <span class="count">{len(kept)}</span>{esc(note)}</h2>'
+            f'<h2>{escape_html(title)} <span class="count">{len(kept)}</span>{escape_html(note)}</h2>'
         )
         if kept:
             out.append("<ul>")
@@ -449,7 +452,7 @@ def html_report(snap, identity=None, rules=()):
             f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>'
         )
         out += [
-            f"<li>{_md_code_to_html(f['text'])} — <em>{esc(rule['reason'])}</em></li>"
+            f"<li>{_md_code_to_html(f['text'])} — <em>{escape_html(rule['reason'])}</em></li>"
             for f, rule in all_suppressed
         ]
         out.append("</ul>")
@@ -460,7 +463,7 @@ def html_report(snap, identity=None, rules=()):
     out.append("</tbody></table>")
 
     suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
-    out.append(f"<footer><strong>{total} findings.</strong>{esc(suffix)}<br>")
+    out.append(f"<footer><strong>{total} findings.</strong>{escape_html(suffix)}<br>")
     out.append(
         "This report enumerates who can do what in the cluster. Treat it as "
         "sensitive: it is a map of the permissions worth attacking."
@@ -496,16 +499,19 @@ def diff(old, new):
         out = {}
         for kind in ROLE_KINDS + BINDING_KINDS:
             for obj in snap[kind]:
-                out[(kind, name(obj))] = obj.get("rules") or obj.get("subjects")
+                # A role carries rules, a binding carries subjects; either one
+                # changing is what "~ changed" means.
+                content = obj.get("rules") or obj.get("subjects")
+                out[(kind, qualified_name(obj))] = content
         return out
 
-    o, n = index(old), index(new)
-    for key in sorted(n.keys() - o.keys()):
+    was, now = index(old), index(new)
+    for key in sorted(now.keys() - was.keys()):
         print(f"+ added   {key[0][:-1]} {key[1]}")
-    for key in sorted(o.keys() - n.keys()):
+    for key in sorted(was.keys() - now.keys()):
         print(f"- removed {key[0][:-1]} {key[1]}")
-    for key in sorted(o.keys() & n.keys()):
-        if o[key] != n[key]:
+    for key in sorted(was.keys() & now.keys()):
+        if was[key] != now[key]:
             print(f"~ changed {key[0][:-1]} {key[1]}")
 
 
@@ -520,30 +526,33 @@ def who_can(verb, resource, snap):
     granting = set()
     for kind in ROLE_KINDS:
         for role in snap[kind]:
-            if any(rule_matches(r) for r in role.get("rules") or []):
+            if any(rule_matches(rule) for rule in role.get("rules") or []):
                 granting.add(
                     (
                         kind[:-1]
                         .replace("role", "Role")
                         .replace("clusterRole", "ClusterRole"),
-                        name(role),
+                        qualified_name(role),
                     )
                 )
     for kind in BINDING_KINDS:
-        for b in snap[kind]:
-            ref = b.get("roleRef", {})
-            ns_name = (
-                f"{b['metadata'].get('namespace', '')}/{ref.get('name', '')}".lstrip(
-                    "/"
-                )
+        for binding in snap[kind]:
+            ref = binding.get("roleRef", {})
+            # A roleRef names a ClusterRole bare and a Role within the
+            # binding's own namespace, so both spellings have to be tried.
+            binding_ns = binding["metadata"].get("namespace", "")
+            namespaced = f"{binding_ns}/{ref.get('name', '')}".lstrip("/")
+            refers_to_granting_role = any(
+                granting_name in (ref.get("name"), namespaced)
+                for _, granting_name in granting
             )
-            if any(n_ in (ref.get("name"), ns_name) for _, n_ in granting):
-                for s in b.get("subjects") or []:
-                    print(
-                        f"{s.get('kind')} {s.get('namespace', '')}/{s.get('name')}".replace(
-                            " /", " "
-                        )
+            if refers_to_granting_role:
+                for subject in binding.get("subjects") or []:
+                    kind_ns_name = (
+                        f"{subject.get('kind')} "
+                        f"{subject.get('namespace', '')}/{subject.get('name')}"
                     )
+                    print(kind_ns_name.replace(" /", " "))
 
 
 def flag_value(argv, flag, default=None):
@@ -579,16 +588,17 @@ def main():
             print(f"\nHTML report written to {out}", file=sys.stderr)
             if "--s3" in sys.argv:
                 sse = flag_value(sys.argv, "--sse", DEFAULT_SSE)
-                err = upload_s3(out, flag_value(sys.argv, "--s3"), sse)
-                if err:
+                upload_error = upload_s3(out, flag_value(sys.argv, "--s3"), sse)
+                if upload_error:
                     # Delivery failed, the audit did not: keep the local file
                     # and the exit code the findings earned.
                     print(
-                        f"warning: S3 upload failed ({err}); {out} kept",
+                        f"warning: S3 upload failed ({upload_error}); {out} kept",
                         file=sys.stderr,
                     )
 
-        sys.exit(2 if findings and "--fail-on-findings" in sys.argv else 0)
+        gating_on_findings = "--fail-on-findings" in sys.argv
+        sys.exit(2 if findings and gating_on_findings else 0)
     elif cmd == "diff":
         with open(sys.argv[2]) as fh:
             diff(json.load(fh), snapshot())
