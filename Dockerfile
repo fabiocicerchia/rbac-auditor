@@ -25,5 +25,6 @@ COPY NOTICE /NOTICE
 COPY --from=fetch /kubectl /usr/local/bin/kubectl
 COPY rbac_audit.py /usr/local/bin/rbac-audit
 USER 10001
+# hardener: run this image with `docker run --read-only` for a read-only rootfs
 ENTRYPOINT ["python", "/usr/local/bin/rbac-audit"]
 CMD ["report"]
