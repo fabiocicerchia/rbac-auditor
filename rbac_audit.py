@@ -23,6 +23,24 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+IGNORE_FILE = ".rbac-audit-ignore"
+
+# The kubectl kinds the snapshot carries, in the order `dump` writes them and
+# the report lists them — so the order is output, not taste. Named because the
+# same tuples are walked from several places and a kind added to one and not
+# the others is a finding that silently stops being looked for.
+ROLE_KINDS = ("roles", "clusterroles")
+BINDING_KINDS = ("rolebindings", "clusterrolebindings")
+INVENTORY_KINDS = ROLE_KINDS + BINDING_KINDS + ("serviceaccounts",)
+SNAPSHOT_KINDS = INVENTORY_KINDS + ("pods",)
+
+# Every namespace has one and it is never "unused"; a pod that names no
+# ServiceAccount gets it. Both readings have to stay the same string.
+DEFAULT_SERVICE_ACCOUNT = "default"
+
+# S3 server-side encryption when --sse is not given.
+DEFAULT_SSE = "AES256"
+
 
 def kubectl_json(*args):
     p = subprocess.run(
@@ -37,15 +55,10 @@ def kubectl_json(*args):
 
 
 def snapshot():
-    return {
-        "taken_at": datetime.now(timezone.utc).isoformat(),
-        "roles": kubectl_json("roles"),
-        "clusterroles": kubectl_json("clusterroles"),
-        "rolebindings": kubectl_json("rolebindings"),
-        "clusterrolebindings": kubectl_json("clusterrolebindings"),
-        "serviceaccounts": kubectl_json("serviceaccounts"),
-        "pods": kubectl_json("pods"),
-    }
+    snap = {"taken_at": datetime.now(timezone.utc).isoformat()}
+    for kind in SNAPSHOT_KINDS:
+        snap[kind] = kubectl_json(kind)
+    return snap
 
 
 def name(obj):
@@ -64,7 +77,7 @@ def finding(text, subject="", role="", verb=""):
 
 
 def wildcard_findings(snap):
-    for kind in ("roles", "clusterroles"):
+    for kind in ROLE_KINDS:
         for role in snap[kind]:
             for rule in role.get("rules") or []:
                 if "*" in (rule.get("verbs") or []) and "*" in (
@@ -98,12 +111,15 @@ def cluster_admin_findings(snap):
 
 def unused_sa_findings(snap):
     used = {
-        (p["metadata"]["namespace"], p["spec"].get("serviceAccountName", "default"))
+        (
+            p["metadata"]["namespace"],
+            p["spec"].get("serviceAccountName", DEFAULT_SERVICE_ACCOUNT),
+        )
         for p in snap["pods"]
     }
     for sa in snap["serviceaccounts"]:
         key = (sa["metadata"]["namespace"], sa["metadata"]["name"])
-        if sa["metadata"]["name"] != "default" and key not in used:
+        if sa["metadata"]["name"] != DEFAULT_SERVICE_ACCOUNT and key not in used:
             yield finding(
                 f"ServiceAccount `{key[0]}/{key[1]}` is not used by any pod",
                 subject=f"ServiceAccount:{key[0]}/{key[1]}",
@@ -115,7 +131,7 @@ def dangling_binding_findings(snap):
         (sa["metadata"]["namespace"], sa["metadata"]["name"])
         for sa in snap["serviceaccounts"]
     }
-    for kind in ("rolebindings", "clusterrolebindings"):
+    for kind in BINDING_KINDS:
         for b in snap[kind]:
             for s in b.get("subjects") or []:
                 if s.get("kind") == "ServiceAccount":
@@ -132,8 +148,6 @@ def dangling_binding_findings(snap):
 
 
 # --- suppressions ------------------------------------------------------------
-
-IGNORE_FILE = ".rbac-audit-ignore"
 
 
 class IgnoreError(Exception):
@@ -297,13 +311,7 @@ def report(snap, rules=()):
         print()
 
     print("## Inventory\n")
-    for kind in (
-        "roles",
-        "clusterroles",
-        "rolebindings",
-        "clusterrolebindings",
-        "serviceaccounts",
-    ):
+    for kind in INVENTORY_KINDS:
         print(f"- {kind}: {len(snap[kind])}")
     suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
     print(f"\n**{total} findings.**{suffix}")
@@ -436,13 +444,7 @@ def html_report(snap, identity=None, rules=()):
         out.append("</ul>")
 
     out.append("<h2>Inventory</h2><table><tbody>")
-    for kind in (
-        "roles",
-        "clusterroles",
-        "rolebindings",
-        "clusterrolebindings",
-        "serviceaccounts",
-    ):
+    for kind in INVENTORY_KINDS:
         out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
     out.append("</tbody></table>")
 
@@ -456,7 +458,7 @@ def html_report(snap, identity=None, rules=()):
     return "\n".join(out)
 
 
-def upload_s3(path, destination, sse="AES256"):
+def upload_s3(path, destination, sse=DEFAULT_SSE):
     """Copy the report to S3 with the AWS CLI. Returns an error string or None.
 
     Shelling out rather than taking a boto3 dependency: the image is a Python
@@ -481,7 +483,7 @@ def upload_s3(path, destination, sse="AES256"):
 def diff(old, new):
     def index(snap):
         out = {}
-        for kind in ("roles", "clusterroles", "rolebindings", "clusterrolebindings"):
+        for kind in ROLE_KINDS + BINDING_KINDS:
             for obj in snap[kind]:
                 out[(kind, name(obj))] = obj.get("rules") or obj.get("subjects")
         return out
@@ -505,7 +507,7 @@ def who_can(verb, resource, snap):
         )
 
     granting = set()
-    for kind in ("roles", "clusterroles"):
+    for kind in ROLE_KINDS:
         for role in snap[kind]:
             if any(rule_matches(r) for r in role.get("rules") or []):
                 granting.add(
@@ -516,7 +518,7 @@ def who_can(verb, resource, snap):
                         name(role),
                     )
                 )
-    for kind in ("rolebindings", "clusterrolebindings"):
+    for kind in BINDING_KINDS:
         for b in snap[kind]:
             ref = b.get("roleRef", {})
             ns_name = (
@@ -558,7 +560,7 @@ def main():
                 fh.write(html_report(snap, cluster_identity(), rules))
             print(f"\nHTML report written to {out}", file=sys.stderr)
             if "--s3" in sys.argv:
-                sse = "AES256"
+                sse = DEFAULT_SSE
                 if "--sse" in sys.argv:
                     sse = sys.argv[sys.argv.index("--sse") + 1]
                 err = upload_s3(out, sys.argv[sys.argv.index("--s3") + 1], sse)
