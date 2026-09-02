@@ -98,7 +98,7 @@ class SnapshotFileTest(unittest.TestCase):
         code = exit_code(ra.load_snapshot, "/nonexistent/january.json")
         self.assertEqual(code, ra.EXIT_NOINPUT)
 
-    def test_unparseable_snapshot_is_dataerr(self):
+    def test_unparsable_snapshot_is_dataerr(self):
         with tempfile.TemporaryDirectory() as tmp:
             junk = Path(tmp) / "january.json"
             junk.write_text("not json at all")
