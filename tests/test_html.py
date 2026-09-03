@@ -4,8 +4,12 @@ stdlib unittest, run with `python3 -m unittest discover tests`: the image has
 no test framework in it and this is not worth adding one for.
 """
 
+import io
+import logging
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import ClassVar
@@ -13,6 +17,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import rbac_audit as ra
+
+# Diagnostics driven on purpose below stay out of the suite's own output;
+# assertLogs still sees the records.
+ra.log.addHandler(logging.NullHandler())
+ra.log.propagate = False
 
 SNAP = {
     "taken_at": "2026-08-15T09:00:00+00:00",
@@ -172,6 +181,47 @@ class IdentityTest(unittest.TestCase):
         with mock.patch("subprocess.run", side_effect=outputs):
             ident = ra.cluster_identity()
         self.assertEqual(ident["server"], "unknown")
+
+
+class DiagnosticsTest(unittest.TestCase):
+    """Diagnostics belong on the logger; stdout belongs to the report.
+
+    `rbac-audit report > audit.md` has to produce a markdown file, so anything
+    that is not the report itself must not reach stdout.
+    """
+
+    def test_html_and_s3_notes_are_logged_and_stay_off_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "r.html")
+            argv = ["report", "--html", out, "--s3", "s3://b/p"]
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    ra, "cluster_identity", return_value={"context": "c", "server": "s"}
+                ),
+                mock.patch.object(ra, "upload_s3", return_value="AccessDenied"),
+                redirect_stdout(stdout),
+                self.assertLogs(ra.log, level="INFO") as logs,
+            ):
+                ra.deliver_html(argv, SNAP, ())
+        self.assertIn(f"INFO:rbac-audit:HTML report written to {out}", logs.output)
+        self.assertIn(
+            f"WARNING:rbac-audit:S3 upload failed (AccessDenied); {out} kept",
+            logs.output,
+        )
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_kubectl_failure_is_logged_at_error_and_exits(self):
+        failed = mock.Mock(returncode=1, stdout="", stderr="the server rejected it\n")
+        with (
+            mock.patch("subprocess.run", return_value=failed),
+            self.assertLogs(ra.log, level="ERROR") as logs,
+            self.assertRaises(SystemExit),
+        ):
+            ra.kubectl_json("roles")
+        # test.sh greps the image's output for exactly this phrase.
+        self.assertIn("kubectl get roles failed", "\n".join(logs.output))
+        self.assertIn("the server rejected it", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

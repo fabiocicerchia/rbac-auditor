@@ -18,39 +18,69 @@ Findings covered by `report`:
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 
+# Diagnostics go here; the report itself goes to stdout, so the two can be
+# redirected apart — `report > audit.md` has to stay a clean markdown file.
+log = logging.getLogger("rbac-audit")
+
+IGNORE_FILE = ".rbac-audit-ignore"
+
+# The kubectl kinds the snapshot carries, in the order `dump` writes them and
+# the report lists them — so the order is output, not taste. Named because the
+# same tuples are walked from several places and a kind added to one and not
+# the others is a finding that silently stops being looked for.
+ROLE_KINDS = ("roles", "clusterroles")
+BINDING_KINDS = ("rolebindings", "clusterrolebindings")
+INVENTORY_KINDS = ROLE_KINDS + BINDING_KINDS + ("serviceaccounts",)
+SNAPSHOT_KINDS = INVENTORY_KINDS + ("pods",)
+
+# Every namespace has one and it is never "unused"; a pod that names no
+# ServiceAccount gets it. Both readings have to stay the same string.
+DEFAULT_SERVICE_ACCOUNT = "default"
+
+# S3 server-side encryption when --sse is not given.
+DEFAULT_SSE = "AES256"
+
+# Exit codes, sysexits(3) names in the comments. 2 is not a sysexits code and
+# is not free to move: docs/architecture.md documents `report --fail-on-findings`
+# exiting 2, and CI gates are written against it.
+EXIT_OK = 0
+EXIT_FINDINGS = 2  # findings remain and --fail-on-findings was passed
+EXIT_USAGE = 64  # EX_USAGE     — missing operand, flag without a value
+EXIT_DATAERR = 65  # EX_DATAERR   — a file that cannot be parsed
+EXIT_NOINPUT = 66  # EX_NOINPUT   — a file named on the command line is missing
+EXIT_UNAVAILABLE = 69  # EX_UNAVAILABLE — kubectl could not reach the cluster
+
 
 def kubectl_json(*args):
-    p = subprocess.run(
+    proc = subprocess.run(
         ["kubectl", "get", *args, "-A", "-o", "json"],
         capture_output=True,
         text=True,
         check=False,  # returncode is inspected below, so a raise would skip the message
     )
-    if p.returncode:
-        sys.exit(f"kubectl get {' '.join(args)} failed:\n{p.stderr.strip()}")
-    return json.loads(p.stdout)["items"]
+    if proc.returncode:
+        log.error("kubectl get %s failed: %s", " ".join(args), proc.stderr.strip())
+        sys.exit(EXIT_UNAVAILABLE)
+    return json.loads(proc.stdout)["items"]
 
 
 def snapshot():
-    return {
-        "taken_at": datetime.now(timezone.utc).isoformat(),
-        "roles": kubectl_json("roles"),
-        "clusterroles": kubectl_json("clusterroles"),
-        "rolebindings": kubectl_json("rolebindings"),
-        "clusterrolebindings": kubectl_json("clusterrolebindings"),
-        "serviceaccounts": kubectl_json("serviceaccounts"),
-        "pods": kubectl_json("pods"),
-    }
+    snap = {"taken_at": datetime.now(timezone.utc).isoformat()}
+    for kind in SNAPSHOT_KINDS:
+        snap[kind] = kubectl_json(kind)
+    return snap
 
 
-def name(obj):
-    m = obj["metadata"]
-    return f"{m.get('namespace', '')}/{m['name']}".lstrip("/")
+def qualified_name(obj):
+    """`namespace/name`, or just `name` when the object is cluster-scoped."""
+    meta = obj["metadata"]
+    return f"{meta.get('namespace', '')}/{meta['name']}".lstrip("/")
 
 
 def finding(text, subject="", role="", verb=""):
@@ -64,33 +94,33 @@ def finding(text, subject="", role="", verb=""):
 
 
 def wildcard_findings(snap):
-    for kind in ("roles", "clusterroles"):
+    for kind in ROLE_KINDS:
         for role in snap[kind]:
             for rule in role.get("rules") or []:
                 if "*" in (rule.get("verbs") or []) and "*" in (
                     rule.get("resources") or []
                 ):
                     yield finding(
-                        f"`{name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources",
-                        role=name(role),
+                        f"`{qualified_name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources",
+                        role=qualified_name(role),
                         verb="*",
                     )
 
 
 def cluster_admin_findings(snap):
-    for b in snap["clusterrolebindings"]:
-        if b.get("roleRef", {}).get("name") == "cluster-admin":
+    for binding in snap["clusterrolebindings"]:
+        if binding.get("roleRef", {}).get("name") == "cluster-admin":
             subjects = (
                 ", ".join(
                     f"{s.get('kind')}:{s.get('namespace', '')}/{s.get('name')}".replace(
                         ":/", ":"
                     )
-                    for s in b.get("subjects") or []
+                    for s in binding.get("subjects") or []
                 )
                 or "(no subjects)"
             )
             yield finding(
-                f"clusterrolebinding `{b['metadata']['name']}` grants cluster-admin to {subjects}",
+                f"clusterrolebinding `{binding['metadata']['name']}` grants cluster-admin to {subjects}",
                 subject=subjects,
                 role="cluster-admin",
             )
@@ -98,12 +128,15 @@ def cluster_admin_findings(snap):
 
 def unused_sa_findings(snap):
     used = {
-        (p["metadata"]["namespace"], p["spec"].get("serviceAccountName", "default"))
-        for p in snap["pods"]
+        (
+            pod["metadata"]["namespace"],
+            pod["spec"].get("serviceAccountName", DEFAULT_SERVICE_ACCOUNT),
+        )
+        for pod in snap["pods"]
     }
     for sa in snap["serviceaccounts"]:
         key = (sa["metadata"]["namespace"], sa["metadata"]["name"])
-        if sa["metadata"]["name"] != "default" and key not in used:
+        if sa["metadata"]["name"] != DEFAULT_SERVICE_ACCOUNT and key not in used:
             yield finding(
                 f"ServiceAccount `{key[0]}/{key[1]}` is not used by any pod",
                 subject=f"ServiceAccount:{key[0]}/{key[1]}",
@@ -115,25 +148,25 @@ def dangling_binding_findings(snap):
         (sa["metadata"]["namespace"], sa["metadata"]["name"])
         for sa in snap["serviceaccounts"]
     }
-    for kind in ("rolebindings", "clusterrolebindings"):
-        for b in snap[kind]:
-            for s in b.get("subjects") or []:
-                if s.get("kind") == "ServiceAccount":
+    for kind in BINDING_KINDS:
+        for binding in snap[kind]:
+            for subject in binding.get("subjects") or []:
+                if subject.get("kind") == "ServiceAccount":
                     key = (
-                        s.get("namespace", b["metadata"].get("namespace", "")),
-                        s["name"],
+                        subject.get(
+                            "namespace", binding["metadata"].get("namespace", "")
+                        ),
+                        subject["name"],
                     )
                     if key not in sas:
                         yield finding(
-                            f"{kind[:-1]} `{name(b)}` references missing ServiceAccount `{key[0]}/{key[1]}`",
+                            f"{kind[:-1]} `{qualified_name(binding)}` references missing ServiceAccount `{key[0]}/{key[1]}`",
                             subject=f"ServiceAccount:{key[0]}/{key[1]}",
-                            role=b.get("roleRef", {}).get("name", ""),
+                            role=binding.get("roleRef", {}).get("name", ""),
                         )
 
 
 # --- suppressions ------------------------------------------------------------
-
-IGNORE_FILE = ".rbac-audit-ignore"
 
 
 class IgnoreError(Exception):
@@ -264,6 +297,43 @@ def sections_for(snap):
     ]
 
 
+def audited_sections(snap, rules):
+    """Every section as (title, kept, suppressed), with the ignore rules applied.
+
+    Both renderers say in their own docstring that the two formats cannot
+    disagree about what was found or what was ignored. This is the sentence
+    made structural: there is one place that decides, and neither renderer
+    calls apply_ignores itself.
+    """
+    sections, all_suppressed = [], []
+    for title, findings in sections_for(snap):
+        kept, suppressed = apply_ignores(findings, rules)
+        all_suppressed.extend(suppressed)
+        sections.append((title, kept, suppressed))
+    return sections, all_suppressed
+
+
+def print_suppressed_section(all_suppressed):
+    """What was hidden, and on whose authority. Nothing disappears quietly."""
+    if not all_suppressed:
+        return
+    print(f"## Suppressed ({len(all_suppressed)})\n")
+    for f, rule in all_suppressed:
+        print(f"- {f['text']} — _{rule['reason']}_")
+    print()
+
+
+def print_stale_section(rules):
+    """Rules that matched nothing — an ignore file rots the same as code."""
+    stale = [r for r in rules if not r["hits"]]
+    if not stale:
+        return
+    print(f"## Stale suppressions ({len(stale)})\n")
+    for r in stale:
+        print(f"- {IGNORE_FILE}:{r['line']}: `{r['raw']}` matched nothing")
+    print()
+
+
 def report(snap, rules=()):
     """Print the markdown report; return the number of UNSUPPRESSED findings.
 
@@ -272,10 +342,9 @@ def report(snap, rules=()):
     """
     print(f"# RBAC audit — {snap['taken_at']}\n")
     rules = list(rules)
-    total, all_suppressed = 0, []
-    for title, findings in sections_for(snap):
-        kept, suppressed = apply_ignores(findings, rules)
-        all_suppressed.extend(suppressed)
+    sections, all_suppressed = audited_sections(snap, rules)
+    total = 0
+    for title, kept, suppressed in sections:
         note = f" ({len(suppressed)} suppressed)" if suppressed else ""
         print(f"## {title} ({len(kept)}){note}\n")
         for f in kept:
@@ -283,27 +352,11 @@ def report(snap, rules=()):
         print()
         total += len(kept)
 
-    if all_suppressed:
-        print(f"## Suppressed ({len(all_suppressed)})\n")
-        for f, rule in all_suppressed:
-            print(f"- {f['text']} — _{rule['reason']}_")
-        print()
-
-    stale = [r for r in rules if not r["hits"]]
-    if stale:
-        print(f"## Stale suppressions ({len(stale)})\n")
-        for r in stale:
-            print(f"- {IGNORE_FILE}:{r['line']}: `{r['raw']}` matched nothing")
-        print()
+    print_suppressed_section(all_suppressed)
+    print_stale_section(rules)
 
     print("## Inventory\n")
-    for kind in (
-        "roles",
-        "clusterroles",
-        "rolebindings",
-        "clusterrolebindings",
-        "serviceaccounts",
-    ):
+    for kind in INVENTORY_KINDS:
         print(f"- {kind}: {len(snap[kind])}")
     suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
     print(f"\n**{total} findings.**{suffix}")
@@ -311,6 +364,18 @@ def report(snap, rules=()):
 
 
 # --- HTML report -------------------------------------------------------------
+
+
+def kubectl_text(*args):
+    """kubectl's stdout, or "" if it failed.
+
+    The counterpart to kubectl_json: this one is for questions the report can
+    do without, so a failure is an empty answer rather than an exit.
+    """
+    proc = subprocess.run(
+        ["kubectl", *args], capture_output=True, text=True, check=False
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def cluster_identity():
@@ -322,16 +387,9 @@ def cluster_identity():
     differently. Best effort — a report is still worth having when kubectl
     cannot say, so this degrades to "unknown" rather than failing the run.
     """
-
-    def kubectl(*args):
-        p = subprocess.run(
-            ["kubectl", *args], capture_output=True, text=True, check=False
-        )
-        return p.stdout.strip() if p.returncode == 0 else ""
-
-    context = kubectl("config", "current-context") or "unknown"
+    context = kubectl_text("config", "current-context") or "unknown"
     server = ""
-    raw = kubectl("config", "view", "--minify", "-o", "json")
+    raw = kubectl_text("config", "view", "--minify", "-o", "json")
     if raw:
         try:
             clusters = json.loads(raw).get("clusters") or []
@@ -343,7 +401,7 @@ def cluster_identity():
     return {"context": context, "server": server or "unknown"}
 
 
-def esc(text):
+def escape_html(text):
     return (
         str(text)
         .replace("&", "&amp;")
@@ -377,10 +435,51 @@ footer { margin-top: 3rem; color: #666; font-size: .85rem; border-top: 1px solid
 
 def _md_code_to_html(text):
     """The finding strings carry markdown backticks; turn them into <code>."""
-    parts = esc(text).split("`")
+    parts = escape_html(text).split("`")
     return "".join(
         p if i % 2 == 0 else f"<code>{p}</code>" for i, p in enumerate(parts)
     )
+
+
+def html_head(snap, identity):
+    """Everything before the first finding: the document head and the header
+    table saying which cluster, which API server and when.
+    """
+    return [
+        "<!doctype html>",
+        '<html lang="en"><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>RBAC audit</title>",
+        f"<style>{HTML_CSS}</style>",
+        "</head><body>",
+        "<h1>RBAC audit</h1>",
+        '<table class="meta"><tbody>',
+        f"<tr><td>Cluster</td><td><code>{escape_html(identity['context'])}</code></td></tr>",
+        f"<tr><td>API server</td><td><code>{escape_html(identity['server'])}</code></td></tr>",
+        f"<tr><td>Generated</td><td><code>{escape_html(snap['taken_at'])}</code></td></tr>",
+        "</tbody></table>",
+    ]
+
+
+def html_suppressed(all_suppressed):
+    """The suppressed list, each finding with the reason that hid it."""
+    if not all_suppressed:
+        return []
+    out = [f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>']
+    for f, rule in all_suppressed:
+        text = _md_code_to_html(f["text"])
+        out.append(f"<li>{text} — <em>{escape_html(rule['reason'])}</em></li>")
+    out.append("</ul>")
+    return out
+
+
+def html_inventory(snap):
+    """How many of each kind the snapshot held."""
+    out = ["<h2>Inventory</h2><table><tbody>"]
+    for kind in INVENTORY_KINDS:
+        out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
+    out.append("</tbody></table>")
+    return out
 
 
 def html_report(snap, identity=None, rules=()):
@@ -391,63 +490,30 @@ def html_report(snap, identity=None, rules=()):
     disagree about what was found or what was ignored.
     """
     identity = identity or {"context": "unknown", "server": "unknown"}
-    sections, all_suppressed = [], []
-    for title, findings in sections_for(snap):
-        kept, suppressed = apply_ignores(findings, rules)
-        all_suppressed.extend(suppressed)
-        sections.append((title, kept, suppressed))
-    out = [
-        "<!doctype html>",
-        '<html lang="en"><head><meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        "<title>RBAC audit</title>",
-        f"<style>{HTML_CSS}</style>",
-        "</head><body>",
-        "<h1>RBAC audit</h1>",
-        '<table class="meta"><tbody>',
-        f"<tr><td>Cluster</td><td><code>{esc(identity['context'])}</code></td></tr>",
-        f"<tr><td>API server</td><td><code>{esc(identity['server'])}</code></td></tr>",
-        f"<tr><td>Generated</td><td><code>{esc(snap['taken_at'])}</code></td></tr>",
-        "</tbody></table>",
-    ]
+    sections, all_suppressed = audited_sections(snap, rules)
+    out = html_head(snap, identity)
 
     total = 0
     for title, kept, suppressed in sections:
         note = f" ({len(suppressed)} suppressed)" if suppressed else ""
         out.append(
-            f'<h2>{esc(title)} <span class="count">{len(kept)}</span>{esc(note)}</h2>'
+            f'<h2>{escape_html(title)} <span class="count">{len(kept)}</span>{escape_html(note)}</h2>'
         )
         if kept:
             out.append("<ul>")
-            out += [f"<li>{_md_code_to_html(f['text'])}</li>" for f in kept]
+            for f in kept:
+                text = _md_code_to_html(f["text"])
+                out.append(f"<li>{text}</li>")
             out.append("</ul>")
         else:
             out.append('<p class="none">None.</p>')
         total += len(kept)
 
-    if all_suppressed:
-        out.append(
-            f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>'
-        )
-        out += [
-            f"<li>{_md_code_to_html(f['text'])} — <em>{esc(rule['reason'])}</em></li>"
-            for f, rule in all_suppressed
-        ]
-        out.append("</ul>")
-
-    out.append("<h2>Inventory</h2><table><tbody>")
-    for kind in (
-        "roles",
-        "clusterroles",
-        "rolebindings",
-        "clusterrolebindings",
-        "serviceaccounts",
-    ):
-        out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
-    out.append("</tbody></table>")
+    out += html_suppressed(all_suppressed)
+    out += html_inventory(snap)
 
     suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
-    out.append(f"<footer><strong>{total} findings.</strong>{esc(suffix)}<br>")
+    out.append(f"<footer><strong>{total} findings.</strong>{escape_html(suffix)}<br>")
     out.append(
         "This report enumerates who can do what in the cluster. Treat it as "
         "sensitive: it is a map of the permissions worth attacking."
@@ -456,7 +522,7 @@ def html_report(snap, identity=None, rules=()):
     return "\n".join(out)
 
 
-def upload_s3(path, destination, sse="AES256"):
+def upload_s3(path, destination, sse=DEFAULT_SSE):
     """Copy the report to S3 with the AWS CLI. Returns an error string or None.
 
     Shelling out rather than taking a boto3 dependency: the image is a Python
@@ -478,107 +544,172 @@ def upload_s3(path, destination, sse="AES256"):
     return None
 
 
-def diff(old, new):
-    def index(snap):
-        out = {}
-        for kind in ("roles", "clusterroles", "rolebindings", "clusterrolebindings"):
-            for obj in snap[kind]:
-                out[(kind, name(obj))] = obj.get("rules") or obj.get("subjects")
-        return out
+def index_by_kind(snap):
+    """{(kind, qualified name): the part of it a diff cares about}."""
+    out = {}
+    for kind in ROLE_KINDS + BINDING_KINDS:
+        for obj in snap[kind]:
+            # A role carries rules, a binding carries subjects; either one
+            # changing is what "~ changed" means.
+            content = obj.get("rules") or obj.get("subjects")
+            out[(kind, qualified_name(obj))] = content
+    return out
 
-    o, n = index(old), index(new)
-    for key in sorted(n.keys() - o.keys()):
+
+def diff(old, new):
+    was, now = index_by_kind(old), index_by_kind(new)
+    for key in sorted(now.keys() - was.keys()):
         print(f"+ added   {key[0][:-1]} {key[1]}")
-    for key in sorted(o.keys() - n.keys()):
+    for key in sorted(was.keys() - now.keys()):
         print(f"- removed {key[0][:-1]} {key[1]}")
-    for key in sorted(o.keys() & n.keys()):
-        if o[key] != n[key]:
+    for key in sorted(was.keys() & now.keys()):
+        if was[key] != now[key]:
             print(f"~ changed {key[0][:-1]} {key[1]}")
 
 
-def who_can(verb, resource, snap):
-    def rule_matches(rule):
-        verbs = rule.get("verbs") or []
-        resources = rule.get("resources") or []
-        return ("*" in verbs or verb in verbs) and (
-            "*" in resources or resource in resources
-        )
+def rule_grants(rule, verb, resource):
+    """Whether one policy rule allows `verb` on `resource`, `*` included."""
+    verbs = rule.get("verbs") or []
+    resources = rule.get("resources") or []
+    return ("*" in verbs or verb in verbs) and (
+        "*" in resources or resource in resources
+    )
 
-    granting = set()
-    for kind in ("roles", "clusterroles"):
-        for role in snap[kind]:
-            if any(rule_matches(r) for r in role.get("rules") or []):
-                granting.add(
-                    (
-                        kind[:-1]
-                        .replace("role", "Role")
-                        .replace("clusterRole", "ClusterRole"),
-                        name(role),
-                    )
+
+def granting_role_names(snap, verb, resource):
+    """Qualified names of the roles whose rules allow `verb` on `resource`.
+
+    Does not resolve `aggregationRule`, so this is a lower bound — see
+    docs/architecture.md, "What `who-can` does not do".
+    """
+    return {
+        qualified_name(role)
+        for kind in ROLE_KINDS
+        for role in snap[kind]
+        if any(rule_grants(rule, verb, resource) for rule in role.get("rules") or [])
+    }
+
+
+def subjects_bound_to(snap, role_names):
+    """Yield `Kind namespace/name` for every subject of a binding that
+    references one of `role_names`. Not deduplicated: two bindings granting the
+    same subject is two lines, because it is two grants to revoke.
+    """
+    for kind in BINDING_KINDS:
+        for binding in snap[kind]:
+            ref = binding.get("roleRef", {})
+            # A roleRef names a ClusterRole bare and a Role within the
+            # binding's own namespace, so both spellings have to be tried.
+            binding_ns = binding["metadata"].get("namespace", "")
+            namespaced = f"{binding_ns}/{ref.get('name', '')}".lstrip("/")
+            if not role_names & {ref.get("name"), namespaced}:
+                continue
+            for subject in binding.get("subjects") or []:
+                kind_ns_name = (
+                    f"{subject.get('kind')} "
+                    f"{subject.get('namespace', '')}/{subject.get('name')}"
                 )
-    for kind in ("rolebindings", "clusterrolebindings"):
-        for b in snap[kind]:
-            ref = b.get("roleRef", {})
-            ns_name = (
-                f"{b['metadata'].get('namespace', '')}/{ref.get('name', '')}".lstrip(
-                    "/"
-                )
-            )
-            if any(n_ in (ref.get("name"), ns_name) for _, n_ in granting):
-                for s in b.get("subjects") or []:
-                    print(
-                        f"{s.get('kind')} {s.get('namespace', '')}/{s.get('name')}".replace(
-                            " /", " "
-                        )
-                    )
+                yield kind_ns_name.replace(" /", " ")
+
+
+def who_can(verb, resource, snap):
+    for line in subjects_bound_to(snap, granting_role_names(snap, verb, resource)):
+        print(line)
+
+
+def flag_value(argv, flag, default=None):
+    """The token after `flag`, or `default` when the flag is not there.
+
+    Four flags took their argument by hand with the same index arithmetic; one
+    of them off by one is a wrong file read with no error. Exits EX_USAGE when
+    the flag is last on the line, rather than raising IndexError at the user.
+    """
+    if flag not in argv:
+        return default
+    try:
+        return argv[argv.index(flag) + 1]
+    except IndexError:
+        log.error("%s needs a value", flag)
+        sys.exit(EXIT_USAGE)
+
+
+def load_snapshot(path):
+    """A previous `dump`, read back for `diff`.
+
+    Exits rather than raising: a snapshot that is missing or is not JSON is
+    something the user can fix, and a traceback does not tell them what.
+    """
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except OSError as err:
+        log.error("cannot read %s: %s", path, err)
+        sys.exit(EXIT_NOINPUT)
+    except json.JSONDecodeError as err:
+        log.error("%s is not a JSON snapshot: %s", path, err)
+        sys.exit(EXIT_DATAERR)
+
+
+def deliver_html(argv, snap, rules):
+    """Write the HTML report where --html asked, and upload it if --s3 did."""
+    out = flag_value(argv, "--html")
+    with open(out, "w") as fh:
+        fh.write(html_report(snap, cluster_identity(), rules))
+    log.info("HTML report written to %s", out)
+    if "--s3" not in argv:
+        return
+    sse = flag_value(argv, "--sse", DEFAULT_SSE)
+    upload_error = upload_s3(out, flag_value(argv, "--s3"), sse)
+    if upload_error:
+        # Delivery failed, the audit did not: keep the local file and the exit
+        # code the findings earned.
+        log.warning("S3 upload failed (%s); %s kept", upload_error, out)
+
+
+def run_report(argv):
+    """The `report` subcommand. Never returns: it exits with the verdict."""
+    path = flag_value(argv, "--ignore-file", IGNORE_FILE)
+    try:
+        rules = load_ignores(path)
+    except IgnoreError as err:
+        log.error("%s", err)
+        sys.exit(EXIT_DATAERR)
+    snap = snapshot()
+    # Suppressed findings never reach this count, so the exit code reflects
+    # what is left to act on — which is the point of suppressing.
+    findings = report(snap, rules)
+
+    # Written from the same snapshot and the same suppressions as the markdown
+    # above, so the two cannot disagree about what was found.
+    if "--html" in argv:
+        deliver_html(argv, snap, rules)
+
+    gating_on_findings = "--fail-on-findings" in argv
+    sys.exit(EXIT_FINDINGS if findings and gating_on_findings else EXIT_OK)
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s: %(message)s", stream=sys.stderr
+    )
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "dump":
         json.dump(snapshot(), sys.stdout, indent=2)
     elif cmd == "report":
-        path = IGNORE_FILE
-        if "--ignore-file" in sys.argv:
-            path = sys.argv[sys.argv.index("--ignore-file") + 1]
-        try:
-            rules = load_ignores(path)
-        except IgnoreError as err:
-            sys.exit(str(err))
-        snap = snapshot()
-        # Suppressed findings never reach this count, so the exit code reflects
-        # what is left to act on — which is the point of suppressing.
-        findings = report(snap, rules)
-
-        # Written from the same snapshot and the same suppressions as the
-        # markdown above, so the two cannot disagree about what was found.
-        if "--html" in sys.argv:
-            out = sys.argv[sys.argv.index("--html") + 1]
-            with open(out, "w") as fh:
-                fh.write(html_report(snap, cluster_identity(), rules))
-            print(f"\nHTML report written to {out}", file=sys.stderr)
-            if "--s3" in sys.argv:
-                sse = "AES256"
-                if "--sse" in sys.argv:
-                    sse = sys.argv[sys.argv.index("--sse") + 1]
-                err = upload_s3(out, sys.argv[sys.argv.index("--s3") + 1], sse)
-                if err:
-                    # Delivery failed, the audit did not: keep the local file
-                    # and the exit code the findings earned.
-                    print(
-                        f"warning: S3 upload failed ({err}); {out} kept",
-                        file=sys.stderr,
-                    )
-
-        sys.exit(2 if findings and "--fail-on-findings" in sys.argv else 0)
+        run_report(sys.argv)
     elif cmd == "diff":
-        with open(sys.argv[2]) as fh:
-            diff(json.load(fh), snapshot())
+        if len(sys.argv) < 3:
+            log.error("usage: rbac-audit diff OLD.json")
+            sys.exit(EXIT_USAGE)
+        diff(load_snapshot(sys.argv[2]), snapshot())
     elif cmd == "who-can":
+        if len(sys.argv) < 4:
+            log.error("usage: rbac-audit who-can VERB RESOURCE")
+            sys.exit(EXIT_USAGE)
         who_can(sys.argv[2], sys.argv[3], snapshot())
     else:
         print(__doc__)
-        sys.exit(64)
+        sys.exit(EXIT_USAGE)
 
 
 if __name__ == "__main__":
