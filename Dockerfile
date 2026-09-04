@@ -19,7 +19,9 @@ LABEL org.opencontainers.image.title="rbac-auditor" \
       org.opencontainers.image.description="Dump and diff Kubernetes RBAC into readable reports" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/fabiocicerchia/rbac-auditor"
-RUN pip install --no-cache-dir pyyaml==6.0.2 \
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+ && rm /tmp/requirements.txt \
  && adduser -D -u 10001 auditor
 COPY NOTICE /NOTICE
 COPY --from=fetch /kubectl /usr/local/bin/kubectl
