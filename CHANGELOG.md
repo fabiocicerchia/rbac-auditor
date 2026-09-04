@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.2.1...v1.2.2) (2026-09-04)
+
+
+### Bug Fixes
+
+* **ci:** pin the editorconfig-checker binary version ([#49](https://github.com/fabiocicerchia/rbac-auditor/issues/49)) ([072abe4](https://github.com/fabiocicerchia/rbac-auditor/commit/072abe4a8c2e52d0ba16e941d2fdc9d9c55ad596))
+
 ## [1.2.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.2.0...v1.2.1) (2026-08-29)
 
 
