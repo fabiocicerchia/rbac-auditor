@@ -163,7 +163,7 @@ Accepted risks otherwise reappear on every run until the real findings are lost
 in them. A `.rbac-audit-ignore` next to the report (or `--ignore-file PATH`)
 suppresses findings by `subject`, `role` or `verb`:
 
-```
+```text
 # The kube-system bootstrap accounts are not ours to fix.
 subject=ServiceAccount:kube-system/* reason=cluster bootstrap, upstream-managed
 

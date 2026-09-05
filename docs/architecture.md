@@ -2,7 +2,7 @@
 
 One Python file, `kubectl` for the API calls, and no client library.
 
-```
+```bash
 kubectl get {roles,clusterroles,rolebindings,clusterrolebindings,
              serviceaccounts,pods} -A -o json
         │
@@ -44,12 +44,12 @@ pod references, and that cannot be answered from RBAC objects alone.
 
 ## The four findings, and what each is really detecting
 
-| Finding | Detects |
-|---|---|
-| **Wildcard grants** | A rule with `*` in **both** verbs and resources. Deliberately narrow: `*` verbs on one named resource is often intentional, and flagging it trains people to ignore the report. |
-| **cluster-admin bindings** | Any ClusterRoleBinding whose `roleRef.name` is `cluster-admin`, with its subjects named. Rarely wrong to have one; usually wrong to have eleven and not know it. |
-| **Unused ServiceAccounts** | A SA no pod mounts. Each one is a credential nobody is watching. `default` is excluded, because every namespace has one and it is never "unused". |
-| **Dangling bindings** | A binding referencing a ServiceAccount that does not exist. Harmless today; a privilege grant that activates the moment someone creates a SA with that name in that namespace. |
+| Finding                    | Detects                                                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Wildcard grants**        | A rule with `*` in **both** verbs and resources. Deliberately narrow: `*` verbs on one named resource is often intentional, and flagging it trains people to ignore the report. |
+| **cluster-admin bindings** | Any ClusterRoleBinding whose `roleRef.name` is `cluster-admin`, with its subjects named. Rarely wrong to have one; usually wrong to have eleven and not know it.                |
+| **Unused ServiceAccounts** | A SA no pod mounts. Each one is a credential nobody is watching. `default` is excluded, because every namespace has one and it is never "unused".                               |
+| **Dangling bindings**      | A binding referencing a ServiceAccount that does not exist. Harmless today; a privilege grant that activates the moment someone creates a SA with that name in that namespace.  |
 
 The dangling-binding case is the one worth understanding: Kubernetes does not
 reject a binding to a nonexistent subject, and it does not warn when the
@@ -78,14 +78,14 @@ willing to block on.
 Everything else follows sysexits, so a CI job can tell "the cluster said no"
 from "you typed it wrong" without reading the message:
 
-| Code | When |
-|---|---|
-| 0 | success |
-| 2 | findings remain and `--fail-on-findings` was passed |
-| 64 | missing operand, or a flag given without its value |
-| 65 | the ignore file or the snapshot could not be parsed |
-| 66 | the snapshot named on the command line does not exist |
-| 69 | `kubectl` could not reach the cluster |
+| Code | When                                                  |
+| ---- | ----------------------------------------------------- |
+| 0    | success                                               |
+| 2    | findings remain and `--fail-on-findings` was passed   |
+| 64   | missing operand, or a flag given without its value    |
+| 65   | the ignore file or the snapshot could not be parsed   |
+| 66   | the snapshot named on the command line does not exist |
+| 69   | `kubectl` could not reach the cluster                 |
 
 The table lives in one place, at the top of `rbac_audit.py`.
 
@@ -104,10 +104,10 @@ which is the point of shipping it rather than describing it.
    to the other four. The text is what a human reads; the `subject`, `role` and
    `verb` fields are what a `.rbac-audit-ignore` rule matches on, so a finding
    with none of them cannot be suppressed.
-2. A row in `sections_for()`. Both renderers walk it through
+1. A row in `sections_for()`. Both renderers walk it through
    `audited_sections()`, so markdown and HTML pick the new section up together
    and cannot disagree about it.
-3. It has to be a pure function of the snapshot — anything that needs its own
+1. It has to be a pure function of the snapshot — anything that needs its own
    API call breaks `diff` and the archived-dump workflow.
 
 Before adding one, ask what a reader does with it. The report is only useful
