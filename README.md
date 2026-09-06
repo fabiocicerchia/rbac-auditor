@@ -26,8 +26,8 @@ report a human actually reads.
 ## Install
 
 ```sh
-make build                       # builds fabiocicerchia/rbac-auditor:0.1.0 locally
-docker pull fabiocicerchia/rbac-auditor:0.1.0
+make install                     # docker pull fabiocicerchia/rbac-auditor:0.1.0
+make build                       # …or build it locally
 ```
 
 ## Usage
@@ -47,7 +47,23 @@ docker run ... diff january.json
 
 ## Development
 
-`make build` / `make lint` / `make test` / `make release`.
+`make help` lists every target. Every repository in this estate exposes the
+same eight verbs, so you do not have to read a Makefile to find out how to
+build or run it (FC-GEN-057).
+
+| Verb      | What it does here                                            |
+| --------- | ------------------------------------------------------------ |
+| `setup`   | Install the pre-commit hook                                  |
+| `install` | Pull the published image                                     |
+| `build`   | Build the image locally                                      |
+| `run`     | Audit the cluster in your kubeconfig — `ARGS=report` default |
+| `test`    | Build, then the smoke tests                                  |
+| `lint`    | `pre-commit run --all-files` — the whole gate                |
+| `format`  | `ruff format .`                                              |
+| `analyze` | `trivy fs` — vulnerabilities, misconfig, secrets             |
+
+Beyond the eight: `push` and `release`. All eight are wired, so there is
+nothing under "Not applicable".
 
 ## Documentation
 

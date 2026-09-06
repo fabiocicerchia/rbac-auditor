@@ -14,9 +14,14 @@ Manifests in `manifests/`, Helm `chart/`.
 
 ```sh
 make help         # every verb this repo exposes
+make setup        # Install the pre-commit hook
+make install      # Pull the published image
 make build        # Build the image locally
-make lint         # Lint the Dockerfile and shell scripts
+make run          # Audit the cluster in your kubeconfig (ARGS=report)
 make test         # Build, then run the smoke tests
+make lint         # pre-commit run --all-files — the whole gate
+make format       # ruff format .
+make analyze      # trivy fs
 make push         # Push the tagged image
 make release      # Multi-arch buildx build and push (version + latest)
 ```
