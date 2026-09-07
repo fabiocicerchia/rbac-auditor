@@ -1,8 +1,14 @@
 IMAGE     ?= fabiocicerchia/rbac-auditor
 VERSION   ?= 0.1.0
 PLATFORMS ?= linux/amd64,linux/arm64
+# Subcommand for `make run`: report, dump, diff <file>, who-can VERB RESOURCE
+ARGS      ?= report
 
-.PHONY: build lint test push release help
+# Every verb this repository exposes lives here; `make` on its own prints them.
+# FC-GEN-057: the same eight verbs in every repo, each either wired or a
+# declared no-op that says why. None of them exit 0 quietly.
+
+.PHONY: help setup install build run test lint format analyze push release
 
 .DEFAULT_GOAL := help
 
@@ -10,15 +16,36 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
 
+setup: ## Install the pre-commit hook
+	pre-commit install
+
+install: ## Pull the published image onto this machine
+	docker pull $(IMAGE):$(VERSION)
+
 build: ## Build the image locally
 	docker build -t $(IMAGE):$(VERSION) .
 
-lint: ## Lint the Dockerfile and shell scripts
-	docker run --rm -i hadolint/hadolint < Dockerfile
-	python3 -m py_compile rbac_audit.py
+# Read-only mount of your kubeconfig, and the container runs as you: the tool
+# only ever reads RBAC, and nothing it writes should land as root.
+run: build ## Audit the cluster in your kubeconfig (ARGS=report by default)
+	docker run --rm --user "$(shell id -u):$(shell id -g)" \
+		-v $(HOME)/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
+		$(IMAGE):$(VERSION) $(ARGS)
 
 test: build ## Build, then run the smoke tests
 	./test.sh $(IMAGE):$(VERSION)
+
+lint: ## Run the whole gate — every hook, every file
+	pre-commit run --all-files
+
+format: ## Format the Python with ruff, the formatter the gate checks
+	ruff format .
+
+analyze: ## Scan the tree the way CI does — vulnerabilities, misconfig, secrets
+	@command -v trivy >/dev/null 2>&1 || { \
+		echo "analyze needs trivy: https://trivy.dev/latest/getting-started/installation/" >&2; \
+		exit 69; }
+	trivy fs --scanners vuln,misconfig,secret --severity CRITICAL,HIGH .
 
 push: build ## Push the tagged image
 	docker push $(IMAGE):$(VERSION)
