@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rbac-auditor"
+description = "Readable RBAC reports from a live Kubernetes cluster"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Fabio Cicerchia" }]
+requires-python = ">=3.10"
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/fabiocicerchia/rbac-auditor"
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+rbac-audit = "rbac_audit:main"
+
+[tool.setuptools]
+py-modules = ["rbac_audit"]
+
+# Read from the one place the version already lives, so a release bump does not
+# have to be repeated here and cannot drift from it.
+[tool.setuptools.dynamic]
+version = { file = "version.txt" }
+
+# The man page rides along in the wheel: `pip install` puts it under
+# <prefix>/share/man/man1, which is on the default manpath for a system install
+# and for a --user one alike.
+[tool.setuptools.data-files]
+"share/man/man1" = ["man/rbac-audit.1"]
