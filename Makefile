@@ -19,8 +19,8 @@ help: ## Show this help
 setup: ## Install the pre-commit hook
 	pre-commit install
 
-install: ## Pull the published image onto this machine
-	docker pull $(IMAGE):$(VERSION)
+install: ## Install the package (and its man page) with pip
+	pip install .
 
 build: ## Build the image locally
 	docker build -t $(IMAGE):$(VERSION) .

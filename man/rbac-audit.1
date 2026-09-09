@@ -1,0 +1,78 @@
+.TH RBAC\-AUDIT 1 "2026-09" "rbac-auditor" "User Commands"
+.SH NAME
+rbac-audit \- readable RBAC reports from a live Kubernetes cluster
+.SH SYNOPSIS
+.B rbac-audit
+.RI [ command ]
+.RI [ options ]
+.SH DESCRIPTION
+Reports who can do what in a cluster, and which of those grants look wrong:
+wildcard grants, cluster-admin bindings, ServiceAccounts no pod references,
+and bindings that point at subjects which do not exist.
+.PP
+With no command it produces a report.
+.SH COMMANDS
+.TP
+.B report
+Full Markdown report: findings, then inventory. Accepts
+.BI \-\-ignore\-file " PATH"
+(suppressions, default
+.IR .rbac-audit-ignore ),
+.BI \-\-html " PATH"
+to also write a self-contained HTML report, and
+.BI \-\-s3 " s3://BUCKET/PREFIX"
+to upload it (with
+.BR \-\-sse ,
+default AES256).
+.TP
+.B dump
+Raw JSON snapshot, for diffing or archiving.
+.TP
+.BI diff " OLD.json"
+Compare a previous
+.B dump
+against the live cluster.
+.TP
+.BI who-can " VERB RESOURCE"
+Subjects allowed VERB on RESOURCE, e.g.
+.BR "who-can delete pods" .
+.SH OPTIONS
+.TP
+.B \-\-fail\-on\-findings
+Exit non-zero when the report contains findings. The CI gate.
+.SH FILES
+.TP
+.I .rbac-audit-ignore
+Suppressions, so that an accepted grant stops being reported.
+.SH EXIT STATUS
+.TP
+.B 0
+The command completed and, where gated, found nothing.
+.TP
+.B non-zero
+Findings with
+.BR \-\-fail\-on\-findings ,
+or a usage error.
+.SH EXAMPLES
+.PP
+Report on the current context:
+.PP
+.RS
+.B rbac-audit report
+.RE
+.PP
+Gate CI:
+.PP
+.RS
+.B rbac-audit report \-\-fail\-on\-findings
+.RE
+.PP
+Who can delete pods:
+.PP
+.RS
+.B rbac-audit who-can delete pods
+.RE
+.SH SEE ALSO
+.BR kubectl (1).
+Project documentation:
+https://github.com/fabiocicerchia/rbac-auditor
