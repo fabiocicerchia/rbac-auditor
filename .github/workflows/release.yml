@@ -2,7 +2,8 @@ name: release
 
 # release-please reads Conventional Commit messages on main and keeps an open
 # "release PR" with the next version bump + CHANGELOG. Merging that PR tags the
-# release (vX.Y.Z) and publishes a GitHub Release. Nothing else to run.
+# release (vX.Y.Z) and publishes a GitHub Release, then this workflow calls
+# publish.yml to build and sign the image for it.
 
 on:
   push:
@@ -22,12 +23,35 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
     permissions:
       contents: write # create tags & releases
       pull-requests: write # open/update the release PR
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+        id: rp
         with:
           # "simple" is language-agnostic (tracks version.txt + CHANGELOG).
           # Swap for node/python/rust/etc. to also bump manifests.
           release-type: simple
+
+  # The release release-please cuts carries GITHUB_TOKEN, and GitHub does not
+  # start workflows from GITHUB_TOKEN events — so publish.yml's own `release:
+  # published` trigger never fires. Call it directly instead; without this the
+  # image is never built at all.
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      packages: write
+      # A called workflow's token is capped by this block: a scope missing
+      # here is `none` inside the callee no matter what the callee declares
+      # for itself. Signing happens in the called workflow, so cosign's OIDC
+      # scope has to be granted here or the release path pushes unsigned.
+      id-token: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
