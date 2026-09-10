@@ -3,7 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rbac-auditor — Kubernetes RBAC as a weekly markdown report a human actually reads, plus who-can queries and snapshot diffs for drift.</title>
+<title>
+  rbac-auditor — Kubernetes RBAC as a weekly markdown report a human actually reads, plus who-can queries and snapshot
+  diffs for drift.
+</title>
 <meta name="description" content="Dumps and diffs Kubernetes RBAC into readable reports: wildcard grants, cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus who-can queries and snapshot diffing for change tracking.">
 <!-- The palette lives in the docs theme, so the splash and /docs/ cannot drift
      apart. The path is relative to the *deployed* layout: splash at /, rendered
@@ -44,8 +47,14 @@ footer{margin-top:2.2rem;color:#5c6684;font-size:.82rem}
 <body>
 <div class="card">
   <h1>🔎 rbac-auditor</h1>
-  <p class="tagline">Kubernetes RBAC as a weekly markdown report a human actually reads, plus who-can queries and snapshot diffs for drift.</p>
-  <p class="desc">Dumps and diffs Kubernetes RBAC into readable reports: wildcard grants, cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus who-can queries and snapshot diffing for change tracking.</p>
+  <p class="tagline">
+    Kubernetes RBAC as a weekly markdown report a human actually reads, plus who-can queries and snapshot diffs for
+    drift.
+  </p>
+  <p class="desc">
+    Dumps and diffs Kubernetes RBAC into readable reports: wildcard grants, cluster-admin bindings, unused
+    ServiceAccounts, dangling bindings, plus who-can queries and snapshot diffing for change tracking.
+  </p>
   <div class="install-label">Install</div>
   <pre><code>make build</code></pre>
   <p class="alt">or: <code>docker pull fabiocicerchia/rbac-auditor:0.1.0</code></p>
