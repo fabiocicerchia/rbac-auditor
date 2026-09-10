@@ -9,8 +9,25 @@ name: Publish Image
 # is the failure worth spending two minutes of runner time to avoid.
 
 on:
+  # A release published by release-please runs under GITHUB_TOKEN, and GitHub
+  # deliberately does not start workflows from GITHUB_TOKEN events — so this
+  # trigger alone never fired, which is why this image was never published.
+  # release.yml now calls this workflow directly via workflow_call; the release
+  # trigger stays for releases cut by a human.
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (e.g. v1.3.0).
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -32,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
 
       - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a  # v4.3.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
@@ -53,7 +70,7 @@ jobs:
       - name: Compute version (strip leading v)
         id: ver
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          TAG_NAME: ${{ inputs.tag || github.event.release.tag_name }}
         run: echo "version=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
 
       # Single-arch, loaded into the local daemon, so test.sh can actually run
