@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rbac-auditor"
-description = "Readable RBAC reports from a live Kubernetes cluster"
+description = "Snapshot Kubernetes RBAC and diff it under a policy"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Fabio Cicerchia" }]
 requires-python = ">=3.10"
-dependencies = []
+# A floor, not a pin: requirements.txt is the pinned, hash-checked lockfile
+# the image installs from, and pinning here as well would make a `pip install`
+# of this package fight whatever the environment already has.
+dependencies = ["pyyaml>=6"]
 dynamic = ["version"]
 
 [project.urls]

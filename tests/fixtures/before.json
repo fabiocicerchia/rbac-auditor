@@ -1,0 +1,97 @@
+{
+  "apiVersion": "rbac-audit/v1",
+  "clusterRoleBindings": [
+    {
+      "name": "view-everyone",
+      "roleRef": {
+        "kind": "ClusterRole",
+        "name": "view"
+      },
+      "subjects": [
+        {
+          "kind": "Group",
+          "name": "system:authenticated"
+        }
+      ]
+    }
+  ],
+  "clusterRoles": [
+    {
+      "name": "cluster-admin",
+      "rules": [
+        {
+          "apiGroups": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "verbs": [
+            "*"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "view",
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        }
+      ]
+    }
+  ],
+  "roleBindings": [
+    {
+      "name": "deployer",
+      "namespace": "ci",
+      "roleRef": {
+        "kind": "Role",
+        "name": "deploy"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "deployer",
+          "namespace": "ci"
+        }
+      ]
+    }
+  ],
+  "roles": [
+    {
+      "name": "deploy",
+      "namespace": "ci",
+      "rules": [
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        }
+      ]
+    }
+  ],
+  "serviceAccounts": [
+    {
+      "name": "deployer",
+      "namespace": "ci"
+    }
+  ]
+}

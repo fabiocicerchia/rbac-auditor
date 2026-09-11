@@ -1,8 +1,8 @@
 IMAGE     ?= fabiocicerchia/rbac-auditor
 VERSION   ?= 0.1.0
 PLATFORMS ?= linux/amd64,linux/arm64
-# Subcommand for `make run`: report, dump, diff <file>, who-can VERB RESOURCE
-ARGS      ?= report
+# Subcommand for `make run`: snapshot, or diff <file> [<file>]
+ARGS      ?= snapshot
 
 # Every verb this repository exposes lives here; `make` on its own prints them.
 # FC-GEN-057: the same eight verbs in every repo, each either wired or a
@@ -27,12 +27,15 @@ build: ## Build the image locally
 
 # Read-only mount of your kubeconfig, and the container runs as you: the tool
 # only ever reads RBAC, and nothing it writes should land as root.
-run: build ## Audit the cluster in your kubeconfig (ARGS=report by default)
+run: build ## Snapshot the cluster in your kubeconfig (ARGS=snapshot by default)
 	docker run --rm --user "$(shell id -u):$(shell id -g)" \
 		-v $(HOME)/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
 		$(IMAGE):$(VERSION) $(ARGS)
 
-test: build ## Build, then run the smoke tests
+# Unit tests first: they need no Docker and no cluster, so a logic error
+# fails in seconds rather than after an image build.
+test: build ## Build, then run the unit tests and the smoke tests
+	python3 -m unittest discover -s tests
 	./test.sh $(IMAGE):$(VERSION)
 
 lint: ## Run the whole gate — every hook, every file

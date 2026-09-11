@@ -7,43 +7,108 @@
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/fabiocicerchia/rbac-auditor/badge)](https://securityscorecards.dev/viewer/?uri=github.com/fabiocicerchia/rbac-auditor)
 [![CI carbon](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fabiocicerchia/rbac-auditor/gh-pages/badge.json)](.github/workflows/carbon-badge.yml)
 
-Dumps and diffs Kubernetes **RBAC into readable reports**: wildcard grants,
-cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus
-`who-can` queries and snapshot diffing for change tracking.
+Commit your cluster's RBAC, then **fail the build when it changes for the
+worse**.
 
-RBAC drift is invisible until an incident. This makes it a weekly markdown
-report a human actually reads.
+`snapshot` writes Roles, ClusterRoles, bindings and ServiceAccounts to a
+deterministic JSON file you keep in git. `diff` compares two of those — or a
+committed one against the live cluster — prints what changed, and applies a
+policy that decides the exit code.
+
+RBAC drift is invisible until an incident. This makes it a pull request.
+
+## What this tool does not do, and what to use instead
+
+Point-in-time questions about a cluster are solved. These tools do them well,
+are krew-installable and have vendors behind them:
+
+| You want                                  | Use                                                          |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| "who can delete pods?"                    | [rbac-tool][rbac-tool] `who-can`, [rbac-lookup][rbac-lookup] |
+| an access matrix for a subject, right now | [rakkess][rakkess], [rbac-tool][rbac-tool] `policy-rules`    |
+| list every wildcard grant in the cluster  | [rbac-tool][rbac-tool] `analysis`                            |
+| visualise who reaches what                | [rbac-tool][rbac-tool] `viz`                                 |
+
+Earlier releases of rbac-auditor shipped a `who-can` query, a findings
+`report` (wildcard grants, cluster-admin bindings, unused ServiceAccounts,
+dangling bindings), an HTML renderer and an S3 upload. **They are gone as of
+2.0.** They duplicated the tools above and did it worse — no aggregated
+ClusterRole resolution, no API discovery.
+
+What none of those tools do is answer *what changed since last week, and is any
+of it dangerous*. That is the whole of this one.
+
+[rakkess]: https://github.com/corneliusweig/rakkess
+[rbac-tool]: https://github.com/alcideio/rbac-tool
+[rbac-lookup]: https://github.com/FairwindsOps/rbac-lookup
 
 ## Commands
 
-| Command                 | Output                                                                                                                               |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `report`                | markdown findings report (`--fail-on-findings` for CI gates, `--ignore-file` for suppressions, `--html PATH` for a shareable report) |
-| `dump`                  | raw JSON snapshot for archiving                                                                                                      |
-| `diff old.json`         | added/removed/changed roles & bindings vs. a snapshot                                                                                |
-| `who-can VERB RESOURCE` | subjects that can e.g. `delete pods`                                                                                                 |
+| Command                              | Output                                                    |
+| ------------------------------------ | --------------------------------------------------------- |
+| `snapshot`                           | deterministic JSON of the cluster's RBAC, for committing  |
+| `diff OLD`                           | that snapshot against the live cluster                    |
+| `diff OLD NEW`                       | two snapshots, no cluster needed                          |
+| `diff OLD [NEW] --subject KIND/NAME` | the same diff as a resource × verb matrix for one subject |
+
+Add `--json PATH` to any `diff` for the machine-readable version (`-` for
+stdout), and `--policy PATH` to point at a policy other than
+`./.rbac-policy.yaml`.
 
 ## Install
 
 ```sh
-make install                     # docker pull fabiocicerchia/rbac-auditor:0.1.0
-make build                       # …or build it locally
+make install                     # pip install .
+make build                       # …or build the image locally
 ```
 
 ## Usage
 
 ```sh
-# local, using your kubeconfig
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig fabiocicerchia/rbac-auditor report
+# take a snapshot and commit it
+rbac-audit snapshot -o rbac/prod.json
+git add rbac/prod.json && git commit -m "chore(rbac): weekly snapshot"
 
-# weekly in-cluster report (read-only ClusterRole included)
-kubectl apply -f manifests/cronjob.yaml
+# a week later: what drifted, and does it fail the policy?
+rbac-audit diff rbac/prod.json          # exits 2 on a policy violation
 
-# month-over-month drift
-docker run ... dump > january.json
-docker run ... diff january.json
+# two committed snapshots — no cluster access, for CI
+rbac-audit diff rbac/prod-2026-09-01.json rbac/prod-2026-09-08.json
+
+# what can this ServiceAccount do today that it could not last week?
+rbac-audit diff rbac/prod.json --subject ServiceAccount/ci/deployer
 ```
+
+```text
+NAMESPACE  RESOURCE                          *  bind escalate get list patch
+*          *.*                               +   .      .      .   .     .
+ci         deployments.apps                  .   .      .      =   =     +
+ci         roles.rbac.authorization.k8s.io   .   +      +      .   .     .
+
+  + gained   - lost   = unchanged   . not granted
+```
+
+In a container, with your kubeconfig:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
+  fabiocicerchia/rbac-auditor snapshot > rbac/prod.json
+```
+
+## The policy
+
+`diff` fails the build (exit 2) on any of these, out of the box:
+
+- a new binding to `cluster-admin`
+- a new rule with `*` in `verbs`, `resources` or `apiGroups`
+- a new grant of `bind`, `escalate` or `impersonate`
+- a new binding to `system:anonymous` or `system:unauthenticated`
+
+Only *additions* are judged: taking a grant away never fails a build. Every
+rule can be exempted per object, downgraded to a warning, or turned off — see
+[`.rbac-policy.example.yaml`](.rbac-policy.example.yaml) and
+[Getting Started](docs/getting-started.md#relaxing-the-policy).
 
 ## Verifying the image
 
@@ -69,19 +134,25 @@ publish workflow for that tag to sign it.
 same eight verbs, so you do not have to read a Makefile to find out how to
 build or run it (FC-GEN-057).
 
-| Verb      | What it does here                                            |
-| --------- | ------------------------------------------------------------ |
-| `setup`   | Install the pre-commit hook                                  |
-| `install` | Pull the published image                                     |
-| `build`   | Build the image locally                                      |
-| `run`     | Audit the cluster in your kubeconfig — `ARGS=report` default |
-| `test`    | Build, then the smoke tests                                  |
-| `lint`    | `pre-commit run --all-files` — the whole gate                |
-| `format`  | `ruff format .`                                              |
-| `analyze` | `trivy fs` — vulnerabilities, misconfig, secrets             |
+| Verb      | What it does here                                         |
+| --------- | --------------------------------------------------------- |
+| `setup`   | Install the pre-commit hook                               |
+| `install` | `pip install .` — the CLI and its man page                |
+| `build`   | Build the image locally                                   |
+| `run`     | Snapshot the cluster in your kubeconfig — `ARGS=snapshot` |
+| `test`    | Unit tests against fixtures, then the image smoke tests   |
+| `lint`    | `pre-commit run --all-files` — the whole gate             |
+| `format`  | `ruff format .`                                           |
+| `analyze` | `trivy fs` — vulnerabilities, misconfig, secrets          |
 
 Beyond the eight: `push` and `release`. All eight are wired, so there is
 nothing under "Not applicable".
+
+The unit tests need no cluster and no Docker:
+
+```sh
+python3 -m unittest discover -s tests
+```
 
 ## Documentation
 

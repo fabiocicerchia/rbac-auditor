@@ -1,5 +1,5 @@
-# rbac-auditor — dumps and diffs Kubernetes RBAC into readable reports:
-# who-can queries, unused ServiceAccounts, wildcard grants.
+# rbac-auditor — snapshots Kubernetes RBAC to a committable JSON file and
+# diffs two snapshots under a policy that decides the exit code.
 ARG KUBECTL_VERSION=1.33.2
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS fetch
@@ -16,7 +16,7 @@ RUN curl -fsSLo /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TA
 
 FROM python:3.14-alpine3.22@sha256:6b91e66ab2a880ce9ca5a1b91c70f45963ff71ff68268df056336e1a657d5efd
 LABEL org.opencontainers.image.title="rbac-auditor" \
-      org.opencontainers.image.description="Dump and diff Kubernetes RBAC into readable reports" \
+      org.opencontainers.image.description="Snapshot Kubernetes RBAC and diff it under a policy" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/fabiocicerchia/rbac-auditor"
 COPY requirements.txt /tmp/requirements.txt
@@ -29,4 +29,4 @@ COPY rbac_audit.py /usr/local/bin/rbac-audit
 USER 10001
 # hardener: run this image with `docker run --read-only` for a read-only rootfs
 ENTRYPOINT ["python", "/usr/local/bin/rbac-audit"]
-CMD ["report"]
+CMD ["snapshot"]

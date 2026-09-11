@@ -1,248 +1,558 @@
 #!/usr/bin/env python3
-"""rbac-audit — readable RBAC reports from a live cluster.
+"""rbac-audit — commit your cluster's RBAC, then diff it under a policy.
 
 Commands:
-  report              full markdown report (findings + inventory)
-                      --ignore-file PATH   suppressions (default .rbac-audit-ignore)
-                      --html PATH          also write a self-contained HTML report
-                      --s3 s3://BUCKET/PREFIX  upload it (--sse, default AES256)
-  dump                raw JSON snapshot (for diffing / archiving)
-  diff OLD.json       compare a previous `dump` against the live cluster
-  who-can VERB RES    subjects allowed VERB on RES (e.g. who-can delete pods)
+  snapshot            deterministic JSON of Roles, ClusterRoles, bindings and
+                      ServiceAccounts, meant to be committed to a repository
+  diff OLD [NEW]      compare two snapshots, or a snapshot against the live
+                      cluster: a readable diff, a machine-readable one, and an
+                      exit code decided by a policy file
+  diff --subject K/N  the same diff scoped to one subject, as a resource x verb
+                      matrix with additions and removals marked
 
-Findings covered by `report`:
-  * wildcard grants (verbs/resources/apiGroups = "*")
-  * cluster-admin bindings
-  * ServiceAccounts never referenced by any pod (unused)
-  * bindings pointing at subjects that do not exist
+Deliberately absent: `who-can` queries, cluster-wide access matrices and
+standalone wildcard listing. rakkess, alcideio/rbac-tool and
+FairwindsOps/rbac-lookup already do those, are krew-installable and
+vendor-backed. What none of them do is track RBAC *over time*, which is all
+this tool is.
 """
 
+import argparse
+import copy
 import json
 import logging
-import os
 import subprocess
 import sys
-from datetime import datetime, timezone
 
-# Diagnostics go here; the report itself goes to stdout, so the two can be
-# redirected apart — `report > audit.md` has to stay a clean markdown file.
+import yaml
+
+# Diagnostics go here; the diff itself goes to stdout, so the two can be
+# redirected apart — `diff old.json > drift.txt` has to stay clean.
 log = logging.getLogger("rbac-audit")
 
-IGNORE_FILE = ".rbac-audit-ignore"
+# The snapshot format is a committed artefact: its version is part of the
+# contract, and a reader that does not know a version refuses rather than
+# guesses. Bump it only for a change a v1 reader cannot make sense of.
+SNAPSHOT_VERSION = "rbac-audit/v1"
 
-# The kubectl kinds the snapshot carries, in the order `dump` writes them and
-# the report lists them — so the order is output, not taste. Named because the
-# same tuples are walked from several places and a kind added to one and not
-# the others is a finding that silently stops being looked for.
-ROLE_KINDS = ("roles", "clusterroles")
-BINDING_KINDS = ("rolebindings", "clusterrolebindings")
-INVENTORY_KINDS = ROLE_KINDS + BINDING_KINDS + ("serviceaccounts",)
-SNAPSHOT_KINDS = INVENTORY_KINDS + ("pods",)
-
-# Every namespace has one and it is never "unused"; a pod that names no
-# ServiceAccount gets it. Both readings have to stay the same string.
-DEFAULT_SERVICE_ACCOUNT = "default"
-
-# S3 server-side encryption when --sse is not given.
-DEFAULT_SSE = "AES256"
+# Policy file looked for in the working directory when --policy is not given.
+POLICY_FILE = ".rbac-policy.yaml"
 
 # Exit codes, sysexits(3) names in the comments. 2 is not a sysexits code and
-# is not free to move: docs/architecture.md documents `report --fail-on-findings`
-# exiting 2, and CI gates are written against it.
+# is not free to move: docs/architecture.md documents it as the policy gate,
+# and CI jobs are written against it.
 EXIT_OK = 0
-EXIT_FINDINGS = 2  # findings remain and --fail-on-findings was passed
+EXIT_VIOLATIONS = 2  # the policy failed on at least one change
 EXIT_USAGE = 64  # EX_USAGE     — missing operand, flag without a value
 EXIT_DATAERR = 65  # EX_DATAERR   — a file that cannot be parsed
 EXIT_NOINPUT = 66  # EX_NOINPUT   — a file named on the command line is missing
 EXIT_UNAVAILABLE = 69  # EX_UNAVAILABLE — kubectl could not reach the cluster
+EXIT_CANTCREAT = 73  # EX_CANTCREAT — an output file could not be written
 
 
-def kubectl_json(*args):
-    proc = subprocess.run(
-        ["kubectl", "get", *args, "-A", "-o", "json"],
-        capture_output=True,
-        text=True,
-        check=False,  # returncode is inspected below, so a raise would skip the message
-    )
+# --- snapshot ----------------------------------------------------------------
+
+
+def kubectl_json(resource, context=None):
+    cmd = ["kubectl"]
+    if context:
+        cmd += ["--context", context]
+    cmd += ["get", resource, "-A", "-o", "json"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # returncode is inspected below, so a raise would skip the message
+        )
+    except FileNotFoundError:
+        # The image ships kubectl; a `pip install` does not. Saying so beats a
+        # traceback, and the files-only workflow needs no kubectl at all.
+        log.error(
+            "kubectl is not on PATH. It is needed to read a cluster; "
+            "`diff OLD NEW` on two snapshot files is not."
+        )
+        sys.exit(EXIT_UNAVAILABLE)
     if proc.returncode:
-        log.error("kubectl get %s failed: %s", " ".join(args), proc.stderr.strip())
+        log.error("kubectl get %s failed: %s", resource, proc.stderr.strip())
         sys.exit(EXIT_UNAVAILABLE)
     return json.loads(proc.stdout)["items"]
 
 
-def snapshot():
-    snap = {"taken_at": datetime.now(timezone.utc).isoformat()}
-    for kind in SNAPSHOT_KINDS:
-        snap[kind] = kubectl_json(kind)
+# The list fields of a PolicyRule, in the order they are rendered. Every one is
+# a set as far as Kubernetes is concerned, which is why normalisation may sort
+# them without changing meaning.
+RULE_FIELDS = ("apiGroups", "resources", "resourceNames", "verbs", "nonResourceURLs")
+
+
+def normalize_rule(rule):
+    """One PolicyRule with its lists sorted, deduplicated and empties dropped.
+
+    Sorting is safe because each field is a set; it is also the whole point —
+    two clusters that grant the same thing have to produce the same bytes, or
+    the diff reports churn nobody caused.
+    """
+    out = {}
+    for field in RULE_FIELDS:
+        values = rule.get(field) or []
+        if values:
+            out[field] = sorted(set(values))
+    return out
+
+
+def canonical(obj):
+    """A stable string for an object, for sorting and set membership."""
+    return json.dumps(obj, sort_keys=True)
+
+
+def normalize_rules(rules):
+    unique = {}
+    for rule in rules or []:
+        normalized = normalize_rule(rule)
+        if normalized:  # a rule granting nothing is not a grant
+            unique[canonical(normalized)] = normalized
+    return [unique[key] for key in sorted(unique)]
+
+
+def normalize_subject(subject, binding_namespace):
+    """One binding subject, with a ServiceAccount's namespace made explicit.
+
+    Kubernetes lets a RoleBinding name a ServiceAccount without a namespace and
+    reads it as the binding's own. Resolving that here keeps the snapshot
+    self-contained: the same grant spelled either way normalises to one record,
+    so moving to the explicit spelling is not reported as a change.
+    """
+    kind = subject.get("kind", "")
+    out = {"kind": kind, "name": subject.get("name", "")}
+    namespace = subject.get("namespace") or (
+        binding_namespace if kind == "ServiceAccount" else ""
+    )
+    if namespace:
+        out["namespace"] = namespace
+    return out
+
+
+def normalize_subjects(subjects, binding_namespace):
+    unique = {}
+    for subject in subjects or []:
+        normalized = normalize_subject(subject, binding_namespace)
+        unique[canonical(normalized)] = normalized
+    return [unique[key] for key in sorted(unique)]
+
+
+def _named(obj):
+    """The identity fields every snapshot record starts with."""
+    meta = obj["metadata"]
+    out = {"name": meta["name"]}
+    if meta.get("namespace"):
+        out["namespace"] = meta["namespace"]
+    return out
+
+
+def normalize_role(obj):
+    out = _named(obj)
+    # Kept because it is what a change to an aggregated ClusterRole looks like
+    # before the controller rewrites the rules.
+    if obj.get("aggregationRule"):
+        out["aggregationRule"] = obj["aggregationRule"]
+    out["rules"] = normalize_rules(obj.get("rules"))
+    return out
+
+
+def normalize_binding(obj):
+    out = _named(obj)
+    ref = obj.get("roleRef") or {}
+    # apiGroup is dropped: it is rbac.authorization.k8s.io for every binding
+    # Kubernetes accepts, so carrying it adds bytes and no information.
+    out["roleRef"] = {"kind": ref.get("kind", ""), "name": ref.get("name", "")}
+    out["subjects"] = normalize_subjects(
+        obj.get("subjects"), obj["metadata"].get("namespace", "")
+    )
+    return out
+
+
+def normalize_service_account(obj):
+    return _named(obj)
+
+
+# Every kind the snapshot carries: (snapshot key, kind name, kubectl resource,
+# normaliser). Named once because the same tuples are walked from the capture,
+# the diff and the subject resolver alike — a kind added to one and not the
+# others is drift the tool stops seeing.
+SECTIONS = (
+    ("clusterRoles", "ClusterRole", "clusterroles", normalize_role),
+    ("roles", "Role", "roles", normalize_role),
+    (
+        "clusterRoleBindings",
+        "ClusterRoleBinding",
+        "clusterrolebindings",
+        normalize_binding,
+    ),
+    ("roleBindings", "RoleBinding", "rolebindings", normalize_binding),
+    (
+        "serviceAccounts",
+        "ServiceAccount",
+        "serviceaccounts",
+        normalize_service_account,
+    ),
+)
+SECTION_KEYS = tuple(section[0] for section in SECTIONS)
+BINDING_KEYS = ("clusterRoleBindings", "roleBindings")
+
+
+def object_id(obj):
+    """`namespace/name`, or just `name` when the object is cluster-scoped."""
+    namespace = obj.get("namespace", "")
+    return f"{namespace}/{obj['name']}" if namespace else obj["name"]
+
+
+def capture(context=None):
+    """Snapshot the live cluster. The only function that talks to it."""
+    snap = {"apiVersion": SNAPSHOT_VERSION}
+    for key, _kind, resource, normalize in SECTIONS:
+        items = [normalize(obj) for obj in kubectl_json(resource, context)]
+        snap[key] = sorted(items, key=object_id)
     return snap
 
 
-def qualified_name(obj):
-    """`namespace/name`, or just `name` when the object is cluster-scoped."""
-    meta = obj["metadata"]
-    return f"{meta.get('namespace', '')}/{meta['name']}".lstrip("/")
+def dump_snapshot(snap):
+    """The committed form: sorted keys, two-space indent, trailing newline.
+
+    Deterministic on purpose. This file lives in a repository and is read as a
+    diff, so byte-identical input has to produce byte-identical output — which
+    is also why nothing in the payload records when it was taken. `git log`
+    already knows.
+    """
+    return json.dumps(snap, indent=2, sort_keys=True) + "\n"
 
 
-def finding(text, subject="", role="", verb=""):
-    """One finding, in the shape the ignore file matches against.
+def load_snapshot(path):
+    """A snapshot read back from disk.
 
-    The text is what a human reads; subject/role/verb are what a suppression
-    names. Kept as three separate fields rather than parsed back out of the
-    text, so a reworded finding does not silently stop matching its
-    suppression."""
-    return {"text": text, "subject": subject, "role": role, "verb": verb}
-
-
-def wildcard_findings(snap):
-    for kind in ROLE_KINDS:
-        for role in snap[kind]:
-            for rule in role.get("rules") or []:
-                if "*" in (rule.get("verbs") or []) and "*" in (
-                    rule.get("resources") or []
-                ):
-                    yield finding(
-                        f"`{qualified_name(role)}` ({kind[:-1]}) grants `*` verbs on `*` resources",
-                        role=qualified_name(role),
-                        verb="*",
-                    )
-
-
-def cluster_admin_findings(snap):
-    for binding in snap["clusterrolebindings"]:
-        if binding.get("roleRef", {}).get("name") == "cluster-admin":
-            subjects = (
-                ", ".join(
-                    f"{s.get('kind')}:{s.get('namespace', '')}/{s.get('name')}".replace(
-                        ":/", ":"
-                    )
-                    for s in binding.get("subjects") or []
-                )
-                or "(no subjects)"
-            )
-            yield finding(
-                f"clusterrolebinding `{binding['metadata']['name']}` grants cluster-admin to {subjects}",
-                subject=subjects,
-                role="cluster-admin",
-            )
-
-
-def unused_sa_findings(snap):
-    used = {
-        (
-            pod["metadata"]["namespace"],
-            pod["spec"].get("serviceAccountName", DEFAULT_SERVICE_ACCOUNT),
+    Exits rather than raising: a file that is missing, is not JSON, or is not a
+    snapshot at all is something the user can fix, and a traceback does not
+    tell them what.
+    """
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        log.error("no such snapshot: %s", path)
+        sys.exit(EXIT_NOINPUT)
+    except OSError as err:
+        log.error("cannot read %s: %s", path, err)
+        sys.exit(EXIT_NOINPUT)
+    except json.JSONDecodeError as err:
+        log.error("%s is not a JSON snapshot: %s", path, err)
+        sys.exit(EXIT_DATAERR)
+    if not isinstance(data, dict) or data.get("apiVersion") != SNAPSHOT_VERSION:
+        log.error(
+            "%s is not a %s snapshot (apiVersion is %r)",
+            path,
+            SNAPSHOT_VERSION,
+            data.get("apiVersion") if isinstance(data, dict) else None,
         )
-        for pod in snap["pods"]
+        sys.exit(EXIT_DATAERR)
+    for key in SECTION_KEYS:
+        data.setdefault(key, [])
+    return data
+
+
+# --- diff --------------------------------------------------------------------
+
+
+def index(snap, key):
+    return {object_id(obj): obj for obj in snap.get(key) or []}
+
+
+def _list_delta(before, after):
+    """Set difference over rules or subjects, both sides in stable order."""
+    was = {canonical(item): item for item in before or []}
+    now = {canonical(item): item for item in after or []}
+    return {
+        "added": [now[k] for k in sorted(now.keys() - was.keys())],
+        "removed": [was[k] for k in sorted(was.keys() - now.keys())],
     }
-    for sa in snap["serviceaccounts"]:
-        key = (sa["metadata"]["namespace"], sa["metadata"]["name"])
-        if sa["metadata"]["name"] != DEFAULT_SERVICE_ACCOUNT and key not in used:
-            yield finding(
-                f"ServiceAccount `{key[0]}/{key[1]}` is not used by any pod",
-                subject=f"ServiceAccount:{key[0]}/{key[1]}",
+
+
+def _change(kind, verb, oid, before, after):
+    """One changed object, in the shape the policy and both renderers read.
+
+    Additions and removals are expressed the same way a modification is — an
+    added role is every one of its rules added — so a policy check never has to
+    ask which of the three it is looking at.
+    """
+    obj = after or before
+    change = {
+        "change": verb,
+        "kind": kind,
+        "id": oid,
+        "object": f"{kind}/{oid}",
+        "name": obj["name"],
+        "namespace": obj.get("namespace", ""),
+    }
+    if "rules" in obj:
+        change["rules"] = _list_delta(
+            (before or {}).get("rules"), (after or {}).get("rules")
+        )
+    if "roleRef" in obj:
+        old_ref = (before or {}).get("roleRef")
+        new_ref = (after or {}).get("roleRef")
+        change["roleRef"] = new_ref or old_ref
+        old_subjects = (before or {}).get("subjects")
+        new_subjects = (after or {}).get("subjects")
+        if before and after and old_ref != new_ref:
+            # roleRef is immutable, so this is a delete-and-recreate under the
+            # same name. Every subject now points at a different role: that is
+            # a new grant for all of them, not an unchanged one.
+            change["roleRefBefore"] = old_ref
+            change["subjects"] = {
+                "added": list(new_subjects or []),
+                "removed": list(old_subjects or []),
+            }
+        else:
+            change["subjects"] = _list_delta(old_subjects, new_subjects)
+    return change
+
+
+def diff_snapshots(old, new):
+    """Every object that was added, removed or changed, in a stable order."""
+    changes = []
+    for key, kind, _resource, _normalize in SECTIONS:
+        was, now = index(old, key), index(new, key)
+        for oid in sorted(now.keys() - was.keys()):
+            changes.append(_change(kind, "added", oid, None, now[oid]))
+        for oid in sorted(was.keys() - now.keys()):
+            changes.append(_change(kind, "removed", oid, was[oid], None))
+        for oid in sorted(was.keys() & now.keys()):
+            if was[oid] != now[oid]:
+                changes.append(_change(kind, "changed", oid, was[oid], now[oid]))
+    return changes
+
+
+# --- policy ------------------------------------------------------------------
+
+
+class PolicyError(Exception):
+    """A malformed policy file. Fatal: a gate nobody can read is worse than no
+    gate, because it decides builds without saying how."""
+
+
+# Defaults. Every rule is on, and every rule fails the build, because a policy
+# that ships permissive is a policy nobody ever tightens. Relaxing is a local
+# decision and belongs in a file somebody reviewed — see docs/getting-started.md.
+DEFAULT_POLICY = {
+    "version": 1,
+    "rules": {
+        "cluster-admin-binding": {
+            "enabled": True,
+            "fail": True,
+            "roles": ["cluster-admin"],
+        },
+        "wildcard": {
+            "enabled": True,
+            "fail": True,
+            "fields": ["verbs", "resources", "apiGroups"],
+        },
+        "escalating-verbs": {
+            "enabled": True,
+            "fail": True,
+            "verbs": ["bind", "escalate", "impersonate"],
+        },
+        "anonymous-subject": {
+            "enabled": True,
+            "fail": True,
+            "subjects": ["system:anonymous", "system:unauthenticated"],
+        },
+    },
+    "exempt": [],
+}
+
+EXEMPT_MATCH_FIELDS = ("rule", "object", "subject")
+
+
+def merge_policy(user):
+    """The defaults with the user's file laid over them, or PolicyError.
+
+    Strict about names: a typo in a rule name would otherwise silently leave
+    that rule at its default, which for a security gate means a check the
+    author believes they turned off and did not.
+    """
+    policy = copy.deepcopy(DEFAULT_POLICY)
+    if user is None:
+        return policy
+    if not isinstance(user, dict):
+        raise PolicyError("policy must be a YAML mapping")
+    unknown = set(user) - {"version", "rules", "exempt"}
+    if unknown:
+        raise PolicyError(f"unknown key(s): {', '.join(sorted(unknown))}")
+    version = user.get("version", 1)
+    if version != 1:
+        raise PolicyError(f"unsupported policy version {version!r}, expected 1")
+
+    rules = user.get("rules") or {}
+    if not isinstance(rules, dict):
+        raise PolicyError("`rules` must be a mapping of rule name to settings")
+    for name, settings in rules.items():
+        if name not in policy["rules"]:
+            known = ", ".join(sorted(policy["rules"]))
+            raise PolicyError(f"unknown policy rule {name!r} (known rules: {known})")
+        if not isinstance(settings, dict):
+            raise PolicyError(f"rule {name!r} must be a mapping")
+        unknown = set(settings) - set(policy["rules"][name])
+        if unknown:
+            raise PolicyError(
+                f"rule {name!r}: unknown setting(s) {', '.join(sorted(unknown))}"
+            )
+        policy["rules"][name].update(settings)
+
+    exemptions = user.get("exempt") or []
+    if not isinstance(exemptions, list):
+        raise PolicyError("`exempt` must be a list")
+    for position, entry in enumerate(exemptions, 1):
+        if not isinstance(entry, dict):
+            raise PolicyError(f"exempt[{position}] must be a mapping")
+        unknown = set(entry) - set(EXEMPT_MATCH_FIELDS) - {"reason"}
+        if unknown:
+            raise PolicyError(
+                f"exempt[{position}]: unknown key(s) {', '.join(sorted(unknown))}"
+            )
+        if not any(field in entry for field in EXEMPT_MATCH_FIELDS):
+            raise PolicyError(
+                f"exempt[{position}]: needs at least one of "
+                f"{', '.join(EXEMPT_MATCH_FIELDS)}"
+            )
+        if not str(entry.get("reason") or "").strip():
+            # Same rule the ignore file had: an accepted risk with no stated
+            # reason is indistinguishable from a mistake six months later.
+            raise PolicyError(f"exempt[{position}]: needs a reason")
+    policy["exempt"] = [dict(entry) for entry in exemptions]
+    return policy
+
+
+def load_policy(path=None):
+    """The policy in `path`, or in ./.rbac-policy.yaml, or the defaults."""
+    explicit = path is not None
+    path = path or POLICY_FILE
+    try:
+        with open(path) as fh:
+            raw = yaml.safe_load(fh)
+    except FileNotFoundError:
+        if explicit:
+            log.error("no such policy file: %s", path)
+            sys.exit(EXIT_NOINPUT)
+        return merge_policy(None)
+    except OSError as err:
+        log.error("cannot read %s: %s", path, err)
+        sys.exit(EXIT_NOINPUT)
+    except yaml.YAMLError as err:
+        log.error("%s is not valid YAML: %s", path, err)
+        sys.exit(EXIT_DATAERR)
+    try:
+        return merge_policy(raw)
+    except PolicyError as err:
+        log.error("%s: %s", path, err)
+        sys.exit(EXIT_DATAERR)
+
+
+def subject_str(subject):
+    namespace = subject.get("namespace", "")
+    name = subject.get("name", "")
+    who = f"{namespace}/{name}" if namespace else name
+    return f"{subject.get('kind', '?')} {who}"
+
+
+def rule_str(rule):
+    """A PolicyRule on one line, in the order RULE_FIELDS declares."""
+    parts = []
+    for field in RULE_FIELDS:
+        if field in rule:
+            values = ",".join(value or '""' for value in rule[field])
+            parts.append(f"{field}={values}")
+    return " ".join(parts)
+
+
+def _violation(rule_name, change, detail, subject=None):
+    out = {
+        "rule": rule_name,
+        "object": change["object"],
+        "kind": change["kind"],
+        "id": change["id"],
+        "detail": detail,
+    }
+    if subject:
+        out["subject"] = subject
+    return out
+
+
+def check_cluster_admin_binding(change, settings):
+    """A subject newly bound to cluster-admin (or another named role)."""
+    ref = change.get("roleRef")
+    if not ref or ref.get("name") not in settings["roles"]:
+        return
+    for subject in change["subjects"]["added"]:
+        yield _violation(
+            "cluster-admin-binding",
+            change,
+            f"binds {subject_str(subject)} to {ref['kind']}/{ref['name']}",
+            subject=subject_str(subject),
+        )
+
+
+def check_wildcard(change, settings):
+    """A new rule carrying `*` in a field the policy watches."""
+    for rule in change.get("rules", {}).get("added", []):
+        hit = [field for field in settings["fields"] if "*" in (rule.get(field) or [])]
+        if hit:
+            yield _violation(
+                "wildcard",
+                change,
+                f"new rule has `*` in {', '.join(hit)}: {rule_str(rule)}",
             )
 
 
-def dangling_binding_findings(snap):
-    sas = {
-        (sa["metadata"]["namespace"], sa["metadata"]["name"])
-        for sa in snap["serviceaccounts"]
-    }
-    for kind in BINDING_KINDS:
-        for binding in snap[kind]:
-            for subject in binding.get("subjects") or []:
-                if subject.get("kind") == "ServiceAccount":
-                    key = (
-                        subject.get(
-                            "namespace", binding["metadata"].get("namespace", "")
-                        ),
-                        subject["name"],
-                    )
-                    if key not in sas:
-                        yield finding(
-                            f"{kind[:-1]} `{qualified_name(binding)}` references missing ServiceAccount `{key[0]}/{key[1]}`",
-                            subject=f"ServiceAccount:{key[0]}/{key[1]}",
-                            role=binding.get("roleRef", {}).get("name", ""),
-                        )
+def check_escalating_verbs(change, settings):
+    """A new grant of bind / escalate / impersonate.
 
-
-# --- suppressions ------------------------------------------------------------
-
-
-class IgnoreError(Exception):
-    """A malformed ignore file. Fatal: a suppression nobody can read is worse
-    than no suppression, because it hides findings without saying so."""
-
-
-def parse_ignore(text):
-    """Parse .rbac-audit-ignore.
-
-    One rule per line, `field=value` pairs separated by spaces, `#` starts a
-    comment. `reason=` is required — an accepted risk with no stated reason is
-    indistinguishable from a mistake six months later:
-
-        # noisy but accepted
-        role=system:controller:* reason=ships with Kubernetes
-        subject=ServiceAccount:kube-system/default reason=cluster bootstrap
-
-    Values may end in `*` to match a prefix. `reason=` swallows the rest of the
-    line, so it needs no quoting.
+    Only literal verbs: a rule with `*` verbs grants these too, and the
+    wildcard rule already says so. Reporting it twice would train people to
+    skim the list.
     """
-    rules = []
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        rule = {"line": lineno, "raw": line}
-        rest = line
-        while rest:
-            field, sep, rest = rest.partition("=")
-            field = field.strip()
-            if not sep:
-                raise IgnoreError(
-                    f"{IGNORE_FILE}:{lineno}: expected field=value, got {field!r}"
-                )
-            if field == "reason":
-                rule["reason"] = rest.strip()
-                rest = ""
-                break
-            # A value runs to the next " field=" boundary.
-            value, rest = _split_value(rest)
-            if field not in ("subject", "role", "verb"):
-                raise IgnoreError(f"{IGNORE_FILE}:{lineno}: unknown field {field!r}")
-            rule[field] = value
-        if not rule.get("reason"):
-            raise IgnoreError(f"{IGNORE_FILE}:{lineno}: every entry needs reason=…")
-        if not any(k in rule for k in ("subject", "role", "verb")):
-            raise IgnoreError(
-                f"{IGNORE_FILE}:{lineno}: needs at least one of subject/role/verb"
+    watched = set(settings["verbs"])
+    for rule in change.get("rules", {}).get("added", []):
+        granted = sorted(set(rule.get("verbs") or []) & watched)
+        if granted:
+            yield _violation(
+                "escalating-verbs",
+                change,
+                f"new rule grants {', '.join(granted)}: {rule_str(rule)}",
             )
-        rules.append(rule)
-    return rules
 
 
-def _split_value(rest):
-    """Split `value field=…` into the value and what follows.
+def check_anonymous_subject(change, settings):
+    """A new binding to system:anonymous or system:unauthenticated."""
+    watched = set(settings["subjects"])
+    for subject in change.get("subjects", {}).get("added", []):
+        if subject.get("name") in watched:
+            ref = change.get("roleRef") or {}
+            yield _violation(
+                "anonymous-subject",
+                change,
+                f"binds {subject_str(subject)} to {ref.get('kind')}/{ref.get('name')}",
+                subject=subject_str(subject),
+            )
 
-    Values can contain almost anything (`system:controller:*`), so the boundary
-    is the last space before the next `field=`, not the first space.
-    """
-    words = rest.split()
-    for i, w in enumerate(words):
-        if (
-            i
-            and "=" in w
-            and w.split("=", 1)[0] in ("subject", "role", "verb", "reason")
-        ):
-            return " ".join(words[:i]), " ".join(words[i:])
-    return rest.strip(), ""
+
+CHECKS = {
+    "cluster-admin-binding": check_cluster_admin_binding,
+    "wildcard": check_wildcard,
+    "escalating-verbs": check_escalating_verbs,
+    "anonymous-subject": check_anonymous_subject,
+}
 
 
 def _matches(pattern, value):
-    # An empty value means the finding has no such attribute — an unused
-    # ServiceAccount has no verb — so a rule naming that field cannot match it.
-    # Without this, `verb=*` (prefix-glob on the empty string) would suppress
-    # every finding in the report rather than every wildcard grant.
+    """Exact, or a prefix when the pattern ends in `*`."""
     if not value:
         return False
     if pattern.endswith("*"):
@@ -250,466 +560,499 @@ def _matches(pattern, value):
     return pattern == value
 
 
-def apply_ignores(findings, rules):
-    """Split findings into (kept, suppressed) and mark which rules fired.
+def exempted_by(violation, policy):
+    """The exemption covering this violation, or None.
 
-    A rule matches when every field it names matches the finding. Fields it
-    does not name are not constraints — `verb=*` alone suppresses every
-    wildcard finding, `role=x verb=*` only that role's.
+    An entry constrains only the fields it names, so `object:
+    ClusterRole/system:*` covers every rule on those roles while `rule:
+    wildcard object: ClusterRole/system:*` covers one.
     """
-    kept, suppressed = [], []
-    for rule in rules:
-        # Accumulate across calls: this runs once per section, and a rule that
-        # fired in an earlier one is not stale.
-        rule.setdefault("hits", 0)
-    for f in findings:
-        hit = None
-        for rule in rules:
-            if all(
-                _matches(rule[k], f[k])
-                for k in ("subject", "role", "verb")
-                if k in rule
-            ):
-                hit = rule
-                break
-        if hit:
-            hit["hits"] += 1
-            suppressed.append((f, hit))
-        else:
-            kept.append(f)
-    return kept, suppressed
-
-
-def load_ignores(path=IGNORE_FILE):
-    try:
-        with open(path) as fh:
-            return parse_ignore(fh.read())
-    except FileNotFoundError:
-        return []
-
-
-def sections_for(snap):
-    return [
-        ("Wildcard grants", list(wildcard_findings(snap))),
-        ("cluster-admin bindings", list(cluster_admin_findings(snap))),
-        ("Unused ServiceAccounts", list(unused_sa_findings(snap))),
-        ("Dangling bindings", list(dangling_binding_findings(snap))),
-    ]
-
-
-def audited_sections(snap, rules):
-    """Every section as (title, kept, suppressed), with the ignore rules applied.
-
-    Both renderers say in their own docstring that the two formats cannot
-    disagree about what was found or what was ignored. This is the sentence
-    made structural: there is one place that decides, and neither renderer
-    calls apply_ignores itself.
-    """
-    sections, all_suppressed = [], []
-    for title, findings in sections_for(snap):
-        kept, suppressed = apply_ignores(findings, rules)
-        all_suppressed.extend(suppressed)
-        sections.append((title, kept, suppressed))
-    return sections, all_suppressed
-
-
-def print_suppressed_section(all_suppressed):
-    """What was hidden, and on whose authority. Nothing disappears quietly."""
-    if not all_suppressed:
-        return
-    print(f"## Suppressed ({len(all_suppressed)})\n")
-    for f, rule in all_suppressed:
-        print(f"- {f['text']} — _{rule['reason']}_")
-    print()
-
-
-def print_stale_section(rules):
-    """Rules that matched nothing — an ignore file rots the same as code."""
-    stale = [r for r in rules if not r["hits"]]
-    if not stale:
-        return
-    print(f"## Stale suppressions ({len(stale)})\n")
-    for r in stale:
-        print(f"- {IGNORE_FILE}:{r['line']}: `{r['raw']}` matched nothing")
-    print()
-
-
-def report(snap, rules=()):
-    """Print the markdown report; return the number of UNSUPPRESSED findings.
-
-    Suppressed ones are counted and listed, never silently dropped: an ignore
-    file you cannot audit is a way to lose findings, not a way to manage them.
-    """
-    print(f"# RBAC audit — {snap['taken_at']}\n")
-    rules = list(rules)
-    sections, all_suppressed = audited_sections(snap, rules)
-    total = 0
-    for title, kept, suppressed in sections:
-        note = f" ({len(suppressed)} suppressed)" if suppressed else ""
-        print(f"## {title} ({len(kept)}){note}\n")
-        for f in kept:
-            print(f"- {f['text']}")
-        print()
-        total += len(kept)
-
-    print_suppressed_section(all_suppressed)
-    print_stale_section(rules)
-
-    print("## Inventory\n")
-    for kind in INVENTORY_KINDS:
-        print(f"- {kind}: {len(snap[kind])}")
-    suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
-    print(f"\n**{total} findings.**{suffix}")
-    return total
-
-
-# --- HTML report -------------------------------------------------------------
-
-
-def kubectl_text(*args):
-    """kubectl's stdout, or "" if it failed.
-
-    The counterpart to kubectl_json: this one is for questions the report can
-    do without, so a failure is an empty answer rather than an exit.
-    """
-    proc = subprocess.run(
-        ["kubectl", *args], capture_output=True, text=True, check=False
-    )
-    return proc.stdout.strip() if proc.returncode == 0 else ""
-
-
-def cluster_identity():
-    """Which cluster this is, for the report header.
-
-    A report handed to an auditor has to say what it describes. The context
-    name is what a human recognises; the API server URL is what actually
-    identifies the cluster, since two kubeconfigs can name the same server
-    differently. Best effort — a report is still worth having when kubectl
-    cannot say, so this degrades to "unknown" rather than failing the run.
-    """
-    context = kubectl_text("config", "current-context") or "unknown"
-    server = ""
-    raw = kubectl_text("config", "view", "--minify", "-o", "json")
-    if raw:
-        try:
-            clusters = json.loads(raw).get("clusters") or []
-            server = (
-                (clusters[0].get("cluster") or {}).get("server", "") if clusters else ""
-            )
-        except (json.JSONDecodeError, AttributeError, IndexError):
-            server = ""
-    return {"context": context, "server": server or "unknown"}
-
-
-def escape_html(text):
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-# Inline, because a report that fetches a stylesheet is a report that renders
-# differently — or not at all — on the air-gapped machine of whoever is reading
-# it a year from now.
-HTML_CSS = """
-:root { color-scheme: light dark; }
-body { font: 15px/1.55 system-ui, sans-serif; margin: 0 auto; max-width: 60rem; padding: 2rem 1rem; }
-h1 { margin-bottom: .25rem; }
-.meta { color: #666; font-size: .9rem; margin-bottom: 2rem; }
-.meta code { background: #8881; padding: .1rem .3rem; border-radius: 3px; }
-h2 { border-bottom: 1px solid #8884; padding-bottom: .3rem; margin-top: 2.5rem; }
-.count { color: #666; font-weight: normal; font-size: .8em; }
-ul { padding-left: 1.2rem; }
-li { margin: .35rem 0; }
-li code { background: #8881; padding: .05rem .3rem; border-radius: 3px; }
-.reason { color: #666; font-style: italic; }
-.none { color: #666; font-style: italic; }
-table { border-collapse: collapse; }
-td { padding: .2rem 1.5rem .2rem 0; }
-footer { margin-top: 3rem; color: #666; font-size: .85rem; border-top: 1px solid #8884; padding-top: 1rem; }
-"""
-
-
-def _md_code_to_html(text):
-    """The finding strings carry markdown backticks; turn them into <code>."""
-    parts = escape_html(text).split("`")
-    return "".join(
-        p if i % 2 == 0 else f"<code>{p}</code>" for i, p in enumerate(parts)
-    )
-
-
-def html_head(snap, identity):
-    """Everything before the first finding: the document head and the header
-    table saying which cluster, which API server and when.
-    """
-    return [
-        "<!doctype html>",
-        '<html lang="en"><head><meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        "<title>RBAC audit</title>",
-        f"<style>{HTML_CSS}</style>",
-        "</head><body>",
-        "<h1>RBAC audit</h1>",
-        '<table class="meta"><tbody>',
-        f"<tr><td>Cluster</td><td><code>{escape_html(identity['context'])}</code></td></tr>",
-        f"<tr><td>API server</td><td><code>{escape_html(identity['server'])}</code></td></tr>",
-        f"<tr><td>Generated</td><td><code>{escape_html(snap['taken_at'])}</code></td></tr>",
-        "</tbody></table>",
-    ]
-
-
-def html_suppressed(all_suppressed):
-    """The suppressed list, each finding with the reason that hid it."""
-    if not all_suppressed:
-        return []
-    out = [f'<h2>Suppressed <span class="count">{len(all_suppressed)}</span></h2><ul>']
-    for f, rule in all_suppressed:
-        text = _md_code_to_html(f["text"])
-        out.append(f"<li>{text} — <em>{escape_html(rule['reason'])}</em></li>")
-    out.append("</ul>")
-    return out
-
-
-def html_inventory(snap):
-    """How many of each kind the snapshot held."""
-    out = ["<h2>Inventory</h2><table><tbody>"]
-    for kind in INVENTORY_KINDS:
-        out.append(f"<tr><td>{kind}</td><td>{len(snap[kind])}</td></tr>")
-    out.append("</tbody></table>")
-    return out
-
-
-def html_report(snap, identity=None, rules=()):
-    """Render the same findings as a self-contained HTML document.
-
-    Only the rendering is separate from report(): the sections and the
-    suppressions come from the same helpers, so the two formats cannot
-    disagree about what was found or what was ignored.
-    """
-    identity = identity or {"context": "unknown", "server": "unknown"}
-    sections, all_suppressed = audited_sections(snap, rules)
-    out = html_head(snap, identity)
-
-    total = 0
-    for title, kept, suppressed in sections:
-        note = f" ({len(suppressed)} suppressed)" if suppressed else ""
-        out.append(
-            f'<h2>{escape_html(title)} <span class="count">{len(kept)}</span>{escape_html(note)}</h2>'
-        )
-        if kept:
-            out.append("<ul>")
-            for f in kept:
-                text = _md_code_to_html(f["text"])
-                out.append(f"<li>{text}</li>")
-            out.append("</ul>")
-        else:
-            out.append('<p class="none">None.</p>')
-        total += len(kept)
-
-    out += html_suppressed(all_suppressed)
-    out += html_inventory(snap)
-
-    suffix = f" ({len(all_suppressed)} suppressed)" if all_suppressed else ""
-    out.append(f"<footer><strong>{total} findings.</strong>{escape_html(suffix)}<br>")
-    out.append(
-        "This report enumerates who can do what in the cluster. Treat it as "
-        "sensitive: it is a map of the permissions worth attacking."
-    )
-    out.append("</footer></body></html>")
-    return "\n".join(out)
-
-
-def upload_s3(path, destination, sse=DEFAULT_SSE):
-    """Copy the report to S3 with the AWS CLI. Returns an error string or None.
-
-    Shelling out rather than taking a boto3 dependency: the image is a Python
-    base plus kubectl, this is optional, and anyone uploading to S3 already has
-    credentials configured the CLI can read.
-
-    A failure here never loses the local report and never changes the exit
-    code — the audit succeeded; only its delivery did not.
-    """
-    key = destination.rstrip("/") + "/" + os.path.basename(path)
-    cmd = ["aws", "s3", "cp", path, key, "--sse", sse]
-    try:
-        # check=False: the return code is the answer here, not an exception.
-        p = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        return "aws CLI not found on PATH"
-    if p.returncode:
-        return p.stderr.strip() or f"aws exited {p.returncode}"
+    for entry in policy["exempt"]:
+        if all(
+            _matches(entry[field], violation.get(field, ""))
+            for field in EXEMPT_MATCH_FIELDS
+            if field in entry
+        ):
+            return entry
     return None
 
 
-def index_by_kind(snap):
-    """{(kind, qualified name): the part of it a diff cares about}."""
-    out = {}
-    for kind in ROLE_KINDS + BINDING_KINDS:
-        for obj in snap[kind]:
-            # A role carries rules, a binding carries subjects; either one
-            # changing is what "~ changed" means.
-            content = obj.get("rules") or obj.get("subjects")
-            out[(kind, qualified_name(obj))] = content
+def evaluate(changes, policy):
+    """(violations, exempted) for a change list, in a stable order.
+
+    Only additions are judged. Removing a grant cannot be the thing a security
+    gate blocks, and a policy that fails a build for taking cluster-admin away
+    is a policy people route around.
+    """
+    violations, exempted = [], []
+    for change in changes:
+        for name in sorted(policy["rules"]):
+            settings = policy["rules"][name]
+            if not settings.get("enabled", True):
+                continue
+            for violation in CHECKS[name](change, settings):
+                violation["fail"] = bool(settings.get("fail", True))
+                entry = exempted_by(violation, policy)
+                if entry:
+                    violation["reason"] = entry["reason"]
+                    exempted.append(violation)
+                else:
+                    violations.append(violation)
+    return violations, exempted
+
+
+def gating(violations):
+    """Whether anything here should fail the build."""
+    return any(violation["fail"] for violation in violations)
+
+
+# --- subject scope -----------------------------------------------------------
+
+SUBJECT_KINDS = {
+    "serviceaccount": "ServiceAccount",
+    "user": "User",
+    "group": "Group",
+}
+
+
+def parse_subject(spec):
+    """`Kind/name`, or `Kind/namespace/name` for a ServiceAccount."""
+    parts = spec.split("/")
+    if len(parts) == 2:
+        kind, namespace, name = parts[0], "", parts[1]
+    elif len(parts) == 3:
+        kind, namespace, name = parts
+    else:
+        log.error("--subject wants Kind/name or Kind/namespace/name, got %r", spec)
+        sys.exit(EXIT_USAGE)
+    canonical_kind = SUBJECT_KINDS.get(kind.lower())
+    if not canonical_kind or not name:
+        log.error(
+            "--subject wants one of %s, e.g. ServiceAccount/ci/deployer",
+            "/".join(sorted(SUBJECT_KINDS.values())),
+        )
+        sys.exit(EXIT_USAGE)
+    if canonical_kind == "ServiceAccount" and not namespace:
+        log.error(
+            "a ServiceAccount needs its namespace: ServiceAccount/<namespace>/%s", name
+        )
+        sys.exit(EXIT_USAGE)
+    return (canonical_kind, namespace, name)
+
+
+def subject_matches(subject, want):
+    return (
+        subject.get("kind", ""),
+        subject.get("namespace", ""),
+        subject.get("name", ""),
+    ) == want
+
+
+def bindings_for(snap, want):
+    """Every binding naming the subject, as (binding kind, binding)."""
+    for key in BINDING_KEYS:
+        kind = "ClusterRoleBinding" if key == "clusterRoleBindings" else "RoleBinding"
+        for binding in snap.get(key) or []:
+            if any(
+                subject_matches(subject, want)
+                for subject in binding.get("subjects") or []
+            ):
+                yield kind, binding
+
+
+def role_ref_id(binding, ref):
+    """(kind, id) of the role a binding points at.
+
+    A roleRef names a ClusterRole bare and a Role within the binding's own
+    namespace, which is the one asymmetry in RBAC worth getting right.
+    """
+    if ref.get("kind") == "ClusterRole":
+        return ("ClusterRole", ref.get("name", ""))
+    namespace = binding.get("namespace", "")
+    return ("Role", f"{namespace}/{ref.get('name', '')}")
+
+
+def subject_scope(old, new, want):
+    """The objects a diff for this subject is allowed to mention.
+
+    The bindings that name it, on either side of the diff, plus the roles those
+    bindings reference — and the ServiceAccount itself when it is one.
+    """
+    ids = set()
+    if want[0] == "ServiceAccount":
+        ids.add(("ServiceAccount", f"{want[1]}/{want[2]}"))
+    for snap in (old, new):
+        for kind, binding in bindings_for(snap, want):
+            ids.add((kind, object_id(binding)))
+            ids.add(role_ref_id(binding, binding.get("roleRef") or {}))
+    return ids
+
+
+def scope_changes(changes, ids):
+    return [change for change in changes if (change["kind"], change["id"]) in ids]
+
+
+# --- subject matrix ----------------------------------------------------------
+
+
+def resource_labels(rule):
+    """The matrix rows one PolicyRule contributes.
+
+    `resource.apiGroup`, the way kubectl spells it, with the core group left
+    bare; `resourceNames` become a `[a,b]` suffix, because a rule narrowed to
+    named objects is a different grant from the same verbs on all of them.
+    Non-resource URLs are rows in their own right.
+    """
+    labels = list(rule.get("nonResourceURLs") or [])
+    groups = rule.get("apiGroups") or []
+    names = rule.get("resourceNames") or []
+    suffix = "[" + ",".join(names) + "]" if names else ""
+    for resource in rule.get("resources") or []:
+        for group in groups:
+            labels.append((f"{resource}.{group}" if group else resource) + suffix)
+    return labels
+
+
+def effective_cells(snap, want):
+    """{(namespace, resource): {verbs}} for one subject.
+
+    `*` as the namespace means cluster-wide. Wildcards in verbs and resources
+    are carried through literally rather than expanded: expanding them needs
+    API discovery, and inventing rows the cluster never returned would make the
+    matrix lie in the direction that matters.
+    """
+    roles = {("Role", object_id(role)): role for role in snap.get("roles") or []} | {
+        ("ClusterRole", role["name"]): role for role in snap.get("clusterRoles") or []
+    }
+    cells = {}
+    for binding_kind, binding in bindings_for(snap, want):
+        ref = binding.get("roleRef") or {}
+        role = roles.get(role_ref_id(binding, ref))
+        if role is None:
+            # A binding to a role that does not exist grants nothing today.
+            continue
+        if binding_kind == "ClusterRoleBinding":
+            namespace = "*"
+        else:
+            namespace = binding.get("namespace", "")
+        for rule in role.get("rules") or []:
+            for label in resource_labels(rule):
+                cells.setdefault((namespace, label), set()).update(
+                    rule.get("verbs") or []
+                )
+    return cells
+
+
+def matrix_rows(before, after):
+    """Rows of (namespace, resource, {verb: marker}) plus the verb columns."""
+    keys = sorted(set(before) | set(after))
+    verbs = sorted({verb for cells in (before, after) for verb in _all_verbs(cells)})
+    rows = []
+    for namespace, resource in keys:
+        was, now = (
+            before.get((namespace, resource), set()),
+            after.get((namespace, resource), set()),
+        )
+        rows.append(
+            {
+                "namespace": namespace,
+                "resource": resource,
+                "added": sorted(now - was),
+                "removed": sorted(was - now),
+                "unchanged": sorted(now & was),
+            }
+        )
+    return rows, verbs
+
+
+def _all_verbs(cells):
+    for verbs in cells.values():
+        yield from verbs
+
+
+# `.` and `=` rather than box-drawing marks: this lands in CI logs, gets piped
+# through grep, and has to survive a terminal that is not a UTF-8 one.
+MARK_ADDED = "+"
+MARK_REMOVED = "-"
+MARK_SAME = "="
+MARK_NONE = "."
+MATRIX_LEGEND = (
+    f"  {MARK_ADDED} gained   {MARK_REMOVED} lost   "
+    f"{MARK_SAME} unchanged   {MARK_NONE} not granted"
+)
+
+
+def render_matrix(rows, verbs):
+    """The resource x verb matrix, additions and removals marked."""
+    if not rows:
+        return ["The subject has no permissions in either snapshot."]
+    namespace_width = max(len("NAMESPACE"), *(len(row["namespace"]) for row in rows))
+    resource_width = max(len("RESOURCE"), *(len(row["resource"]) for row in rows))
+    widths = [max(len(verb), 3) for verb in verbs]
+
+    def line(namespace, resource, cells):
+        columns = " ".join(
+            cell.center(width) for cell, width in zip(cells, widths, strict=True)
+        )
+        # rstrip: the last column is centred, so every row would otherwise end
+        # in invisible padding — which a diff view and a test assertion both
+        # see and a reader does not.
+        return f"{namespace:<{namespace_width}}  {resource:<{resource_width}}  {columns}".rstrip()
+
+    out = [line("NAMESPACE", "RESOURCE", verbs)]
+    for row in rows:
+        cells = []
+        for verb in verbs:
+            if verb in row["added"]:
+                cells.append(MARK_ADDED)
+            elif verb in row["removed"]:
+                cells.append(MARK_REMOVED)
+            elif verb in row["unchanged"]:
+                cells.append(MARK_SAME)
+            else:
+                cells.append(MARK_NONE)
+        out.append(line(row["namespace"], row["resource"], cells))
+    out += ["", MATRIX_LEGEND]
     return out
 
 
-def diff(old, new):
-    was, now = index_by_kind(old), index_by_kind(new)
-    for key in sorted(now.keys() - was.keys()):
-        print(f"+ added   {key[0][:-1]} {key[1]}")
-    for key in sorted(was.keys() - now.keys()):
-        print(f"- removed {key[0][:-1]} {key[1]}")
-    for key in sorted(was.keys() & now.keys()):
-        if was[key] != now[key]:
-            print(f"~ changed {key[0][:-1]} {key[1]}")
+# --- rendering ---------------------------------------------------------------
+
+CHANGE_MARK = {"added": "+", "removed": "-", "changed": "~"}
 
 
-def rule_grants(rule, verb, resource):
-    """Whether one policy rule allows `verb` on `resource`, `*` included."""
-    verbs = rule.get("verbs") or []
-    resources = rule.get("resources") or []
-    return ("*" in verbs or verb in verbs) and (
-        "*" in resources or resource in resources
+def render_changes(changes):
+    out = []
+    for change in changes:
+        out.append(f"{CHANGE_MARK[change['change']]} {change['object']}")
+        ref = change.get("roleRef")
+        if ref:
+            before = change.get("roleRefBefore")
+            moved = f" (was {before['kind']}/{before['name']})" if before else ""
+            out.append(f"    roleRef {ref['kind']}/{ref['name']}{moved}")
+        for rule in change.get("rules", {}).get("added", []):
+            out.append(f"    + rule {rule_str(rule)}")
+        for rule in change.get("rules", {}).get("removed", []):
+            out.append(f"    - rule {rule_str(rule)}")
+        for subject in change.get("subjects", {}).get("added", []):
+            out.append(f"    + {subject_str(subject)}")
+        for subject in change.get("subjects", {}).get("removed", []):
+            out.append(f"    - {subject_str(subject)}")
+    return out
+
+
+def render_violations(violations, exempted):
+    """The verdict, and then what was let through and on whose authority.
+
+    "No policy violations." is printed even when everything was exempted: a
+    clean gate and a gate somebody switched off have to read differently.
+    """
+    out = []
+    if violations:
+        out.append(f"Policy violations ({len(violations)})")
+        for violation in violations:
+            mark = "" if violation["fail"] else " (warn)"
+            out.append(f"  [{violation['rule']}]{mark} {violation['object']}")
+            out.append(f"      {violation['detail']}")
+    else:
+        out.append("No policy violations.")
+    if exempted:
+        out.append("")
+        out.append(f"Exempted ({len(exempted)})")
+        for violation in exempted:
+            out.append(
+                f"  [{violation['rule']}] {violation['object']} — {violation['reason']}"
+            )
+    return out
+
+
+def summarize(changes, violations, exempted):
+    counts = {"added": 0, "removed": 0, "changed": 0}
+    for change in changes:
+        counts[change["change"]] += 1
+    counts["violations"] = len(violations)
+    counts["exempted"] = len(exempted)
+    return counts
+
+
+def render_report(changes, violations, exempted, header, matrix=None):
+    out = list(header)
+    out.append("")
+    if matrix is None:
+        out += render_changes(changes) or ["No changes."]
+    else:
+        out += render_matrix(*matrix)
+    out.append("")
+    out += render_violations(violations, exempted)
+    counts = summarize(changes, violations, exempted)
+    out.append("")
+    out.append(
+        f"{counts['added']} added, {counts['removed']} removed, "
+        f"{counts['changed']} changed; {counts['violations']} policy violations"
+        + (f", {counts['exempted']} exempted" if counts["exempted"] else "")
+        + "."
     )
+    return "\n".join(out)
 
 
-def granting_role_names(snap, verb, resource):
-    """Qualified names of the roles whose rules allow `verb` on `resource`.
-
-    Does not resolve `aggregationRule`, so this is a lower bound — see
-    docs/architecture.md, "What `who-can` does not do".
-    """
-    return {
-        qualified_name(role)
-        for kind in ROLE_KINDS
-        for role in snap[kind]
-        if any(rule_grants(rule, verb, resource) for rule in role.get("rules") or [])
+def machine_report(changes, violations, exempted, source, target, subject, matrix):
+    out = {
+        "apiVersion": SNAPSHOT_VERSION,
+        "from": source,
+        "to": target,
+        "summary": summarize(changes, violations, exempted),
+        "changes": changes,
+        "violations": violations,
+        "exempted": exempted,
     }
+    if subject:
+        out["subject"] = "/".join(part for part in subject if part)
+        rows, verbs = matrix
+        out["matrix"] = {"verbs": verbs, "rows": rows}
+    return json.dumps(out, indent=2, sort_keys=True) + "\n"
 
 
-def subjects_bound_to(snap, role_names):
-    """Yield `Kind namespace/name` for every subject of a binding that
-    references one of `role_names`. Not deduplicated: two bindings granting the
-    same subject is two lines, because it is two grants to revoke.
-    """
-    for kind in BINDING_KINDS:
-        for binding in snap[kind]:
-            ref = binding.get("roleRef", {})
-            # A roleRef names a ClusterRole bare and a Role within the
-            # binding's own namespace, so both spellings have to be tried.
-            binding_ns = binding["metadata"].get("namespace", "")
-            namespaced = f"{binding_ns}/{ref.get('name', '')}".lstrip("/")
-            if not role_names & {ref.get("name"), namespaced}:
-                continue
-            for subject in binding.get("subjects") or []:
-                kind_ns_name = (
-                    f"{subject.get('kind')} "
-                    f"{subject.get('namespace', '')}/{subject.get('name')}"
-                )
-                yield kind_ns_name.replace(" /", " ")
+# --- commands ----------------------------------------------------------------
 
 
-def who_can(verb, resource, snap):
-    for line in subjects_bound_to(snap, granting_role_names(snap, verb, resource)):
-        print(line)
-
-
-def flag_value(argv, flag, default=None):
-    """The token after `flag`, or `default` when the flag is not there.
-
-    Four flags took their argument by hand with the same index arithmetic; one
-    of them off by one is a wrong file read with no error. Exits EX_USAGE when
-    the flag is last on the line, rather than raising IndexError at the user.
-    """
-    if flag not in argv:
-        return default
+def write_out(path, text):
+    """Write to a file, or to stdout when the path is `-`."""
+    if path == "-":
+        sys.stdout.write(text)
+        return
     try:
-        return argv[argv.index(flag) + 1]
-    except IndexError:
-        log.error("%s needs a value", flag)
+        with open(path, "w") as fh:
+            fh.write(text)
+    except OSError as err:
+        log.error("cannot write %s: %s", path, err)
+        sys.exit(EXIT_CANTCREAT)
+
+
+def run_snapshot(args):
+    snap = capture(args.context)
+    write_out(args.output, dump_snapshot(snap))
+    if args.output != "-":
+        log.info("snapshot written to %s", args.output)
+    sys.exit(EXIT_OK)
+
+
+def run_diff(args):
+    old = load_snapshot(args.old)
+    if args.new:
+        new, target = load_snapshot(args.new), args.new
+    else:
+        new, target = capture(args.context), "live cluster"
+
+    changes = diff_snapshots(old, new)
+    matrix = None
+    subject = None
+    if args.subject:
+        subject = parse_subject(args.subject)
+        changes = scope_changes(changes, subject_scope(old, new, subject))
+        matrix = matrix_rows(
+            effective_cells(old, subject), effective_cells(new, subject)
+        )
+
+    if args.no_policy:
+        policy = merge_policy({"rules": {name: {"enabled": False} for name in CHECKS}})
+    else:
+        policy = load_policy(args.policy)
+    violations, exempted = evaluate(changes, policy)
+
+    header = [f"RBAC diff — {args.old} → {target}"]
+    if subject:
+        header.append(
+            f"Subject: {subject_str({'kind': subject[0], 'namespace': subject[1], 'name': subject[2]})}"
+        )
+
+    if args.json:
+        write_out(
+            args.json,
+            machine_report(
+                changes, violations, exempted, args.old, target, subject, matrix
+            ),
+        )
+    # `--json -` puts the machine report on stdout; printing the human one
+    # there too would corrupt it.
+    if args.json != "-":
+        print(render_report(changes, violations, exempted, header, matrix))
+
+    sys.exit(EXIT_VIOLATIONS if gating(violations) else EXIT_OK)
+
+
+class Parser(argparse.ArgumentParser):
+    """argparse, but usage errors exit 64 like every other usage error here.
+
+    Its default is 2, which this tool spends on "the policy failed" — a CI job
+    cannot be allowed to read a typo as a security finding.
+    """
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        log.error("%s", message)
         sys.exit(EXIT_USAGE)
 
 
-def load_snapshot(path):
-    """A previous `dump`, read back for `diff`.
+def build_parser():
+    parser = Parser(
+        prog="rbac-audit",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command")
 
-    Exits rather than raising: a snapshot that is missing or is not JSON is
-    something the user can fix, and a traceback does not tell them what.
-    """
-    try:
-        with open(path) as fh:
-            return json.load(fh)
-    except OSError as err:
-        log.error("cannot read %s: %s", path, err)
-        sys.exit(EXIT_NOINPUT)
-    except json.JSONDecodeError as err:
-        log.error("%s is not a JSON snapshot: %s", path, err)
-        sys.exit(EXIT_DATAERR)
+    snap = sub.add_parser("snapshot", help="dump RBAC to a deterministic JSON file")
+    snap.add_argument(
+        "-o",
+        "--output",
+        default="-",
+        metavar="PATH",
+        help="write here (default stdout)",
+    )
+    snap.add_argument("--context", metavar="NAME", help="kubeconfig context to read")
+    snap.set_defaults(func=run_snapshot)
 
-
-def deliver_html(argv, snap, rules):
-    """Write the HTML report where --html asked, and upload it if --s3 did."""
-    out = flag_value(argv, "--html")
-    with open(out, "w") as fh:
-        fh.write(html_report(snap, cluster_identity(), rules))
-    log.info("HTML report written to %s", out)
-    if "--s3" not in argv:
-        return
-    sse = flag_value(argv, "--sse", DEFAULT_SSE)
-    upload_error = upload_s3(out, flag_value(argv, "--s3"), sse)
-    if upload_error:
-        # Delivery failed, the audit did not: keep the local file and the exit
-        # code the findings earned.
-        log.warning("S3 upload failed (%s); %s kept", upload_error, out)
-
-
-def run_report(argv):
-    """The `report` subcommand. Never returns: it exits with the verdict."""
-    path = flag_value(argv, "--ignore-file", IGNORE_FILE)
-    try:
-        rules = load_ignores(path)
-    except IgnoreError as err:
-        log.error("%s", err)
-        sys.exit(EXIT_DATAERR)
-    snap = snapshot()
-    # Suppressed findings never reach this count, so the exit code reflects
-    # what is left to act on — which is the point of suppressing.
-    findings = report(snap, rules)
-
-    # Written from the same snapshot and the same suppressions as the markdown
-    # above, so the two cannot disagree about what was found.
-    if "--html" in argv:
-        deliver_html(argv, snap, rules)
-
-    gating_on_findings = "--fail-on-findings" in argv
-    sys.exit(EXIT_FINDINGS if findings and gating_on_findings else EXIT_OK)
+    diff = sub.add_parser("diff", help="compare snapshots and apply the policy")
+    diff.add_argument("old", metavar="OLD", help="the snapshot to compare from")
+    diff.add_argument(
+        "new",
+        metavar="NEW",
+        nargs="?",
+        help="the snapshot to compare to (default: the live cluster)",
+    )
+    diff.add_argument(
+        "--policy",
+        metavar="PATH",
+        help=f"policy file (default: ./{POLICY_FILE} if it exists)",
+    )
+    diff.add_argument(
+        "--no-policy", action="store_true", help="report changes without gating on them"
+    )
+    diff.add_argument(
+        "--subject",
+        metavar="KIND/NAME",
+        help="scope the diff to one subject, as a resource x verb matrix",
+    )
+    diff.add_argument(
+        "--json",
+        metavar="PATH",
+        help="also write the machine-readable diff (`-` for stdout)",
+    )
+    diff.add_argument("--context", metavar="NAME", help="kubeconfig context to read")
+    diff.set_defaults(func=run_diff)
+    return parser
 
 
 def main():
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s: %(message)s", stream=sys.stderr
     )
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
-    if cmd == "dump":
-        json.dump(snapshot(), sys.stdout, indent=2)
-    elif cmd == "report":
-        run_report(sys.argv)
-    elif cmd == "diff":
-        if len(sys.argv) < 3:
-            log.error("usage: rbac-audit diff OLD.json")
-            sys.exit(EXIT_USAGE)
-        diff(load_snapshot(sys.argv[2]), snapshot())
-    elif cmd == "who-can":
-        if len(sys.argv) < 4:
-            log.error("usage: rbac-audit who-can VERB RESOURCE")
-            sys.exit(EXIT_USAGE)
-        who_can(sys.argv[2], sys.argv[3], snapshot())
-    else:
-        print(__doc__)
+    parser = build_parser()
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
         sys.exit(EXIT_USAGE)
+    args.func(args)
 
 
 if __name__ == "__main__":

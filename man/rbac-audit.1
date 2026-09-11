@@ -1,76 +1,125 @@
 .TH RBAC\-AUDIT 1 "2026-09" "rbac-auditor" "User Commands"
 .SH NAME
-rbac-audit \- readable RBAC reports from a live Kubernetes cluster
+rbac-audit \- snapshot Kubernetes RBAC and diff it under a policy
 .SH SYNOPSIS
-.B rbac-audit
-.RI [ command ]
+.B rbac-audit snapshot
+.RI [ options ]
+.br
+.B rbac-audit diff
+.I OLD
+.RI [ NEW ]
 .RI [ options ]
 .SH DESCRIPTION
-Reports who can do what in a cluster, and which of those grants look wrong:
-wildcard grants, cluster-admin bindings, ServiceAccounts no pod references,
-and bindings that point at subjects which do not exist.
+Writes a cluster's Roles, ClusterRoles, RoleBindings, ClusterRoleBindings and
+ServiceAccounts to a deterministic JSON file meant to be committed to a
+repository, and compares two such files \(em or one against the live cluster
+\(em under a policy that decides the exit status.
 .PP
-With no command it produces a report.
+Point-in-time questions ("who can delete pods", access matrices, listing every
+wildcard grant) are deliberately not here. Use
+.BR rakkess ,
+.B rbac-tool
+or
+.B rbac-lookup
+for those.
 .SH COMMANDS
 .TP
-.B report
-Full Markdown report: findings, then inventory. Accepts
-.BI \-\-ignore\-file " PATH"
-(suppressions, default
-.IR .rbac-audit-ignore ),
-.BI \-\-html " PATH"
-to also write a self-contained HTML report, and
-.BI \-\-s3 " s3://BUCKET/PREFIX"
-to upload it (with
-.BR \-\-sse ,
-default AES256).
+.B snapshot
+Dump RBAC as deterministic JSON: sorted, normalised, and with no timestamp in
+the payload, so an unchanged cluster produces byte-identical output.
 .TP
-.B dump
-Raw JSON snapshot, for diffing or archiving.
-.TP
-.BI diff " OLD.json"
-Compare a previous
-.B dump
-against the live cluster.
-.TP
-.BI who-can " VERB RESOURCE"
-Subjects allowed VERB on RESOURCE, e.g.
-.BR "who-can delete pods" .
+.BI diff " OLD " [ NEW ]
+Compare two snapshots, or
+.I OLD
+against the live cluster when
+.I NEW
+is omitted. Prints a readable diff, applies the policy and exits 2 if it fails.
 .SH OPTIONS
 .TP
-.B \-\-fail\-on\-findings
-Exit non-zero when the report contains findings. The CI gate.
+.BI \-o ", " \-\-output " PATH"
+Where
+.B snapshot
+writes.
+.B \-
+is standard output, which is the default.
+.TP
+.BI \-\-context " NAME"
+The kubeconfig context to read. Only meaningful when a cluster is consulted.
+.TP
+.BI \-\-policy " PATH"
+The policy file. Defaults to
+.I .rbac-policy.yaml
+in the working directory if it exists, and to the built-in rules otherwise.
+.TP
+.B \-\-no\-policy
+Report the changes without gating on them. For reading, not for pipelines.
+.TP
+.BI \-\-subject " KIND/NAME"
+Scope the diff to one subject and render it as a resource \(mu verb matrix with
+additions and removals marked.
+.I KIND
+is ServiceAccount, User or Group; a ServiceAccount needs its namespace, as
+.IR ServiceAccount/ namespace / name .
+.TP
+.BI \-\-json " PATH"
+Also write the machine-readable diff.
+.B \-
+sends it to standard output and suppresses the human report, so the pipe stays
+parseable.
 .SH FILES
 .TP
-.I .rbac-audit-ignore
-Suppressions, so that an accepted grant stops being reported.
+.I .rbac-policy.yaml
+The policy: which additions fail the build, and which objects are exempt from
+that. See
+.I .rbac-policy.example.yaml
+in the distribution.
 .SH EXIT STATUS
 .TP
 .B 0
-The command completed and, where gated, found nothing.
+No policy violations, or every one of them exempted.
 .TP
-.B non-zero
-Findings with
-.BR \-\-fail\-on\-findings ,
-or a usage error.
+.B 2
+At least one policy violation.
+.TP
+.B 64
+Usage error: a missing operand, an unknown flag, a malformed \-\-subject.
+.TP
+.B 65
+A snapshot or policy file that could not be parsed.
+.TP
+.B 66
+A file named on the command line does not exist.
+.TP
+.B 69
+.BR kubectl (1)
+could not reach the cluster, or is not installed.
+.TP
+.B 73
+An output file could not be written.
 .SH EXAMPLES
 .PP
-Report on the current context:
+Take a snapshot and commit it:
 .PP
 .RS
-.B rbac-audit report
+.B rbac-audit snapshot \-o rbac/prod.json
 .RE
 .PP
-Gate CI:
+Gate CI on drift against the live cluster:
 .PP
 .RS
-.B rbac-audit report \-\-fail\-on\-findings
+.B rbac-audit diff rbac/prod.json
 .RE
 .PP
-Who can delete pods:
+Two files, no cluster access:
 .PP
 .RS
-.B rbac-audit who-can delete pods
+.B rbac-audit diff last-week.json this-week.json
+.RE
+.PP
+What one ServiceAccount gained:
+.PP
+.RS
+.B rbac-audit diff last-week.json \-\-subject ServiceAccount/ci/deployer
 .RE
 .SH SEE ALSO
 .BR kubectl (1).

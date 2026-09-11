@@ -10,7 +10,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 command: []
-args: ["report"]
+args: ["snapshot"]
 
 env: {}
 envFrom: []
@@ -72,7 +72,7 @@ rbac:
       resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
       verbs: ["get", "list"]
     - apiGroups: [""]
-      resources: ["serviceaccounts", "namespaces", "pods"]
+      resources: ["serviceaccounts", "namespaces"]
       verbs: ["get", "list"]
 
 podSecurityContext:

@@ -4,10 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>
-  rbac-auditor — Kubernetes RBAC as a weekly markdown report a human actually reads, plus who-can queries and snapshot
-  diffs for drift.
+  rbac-auditor — commit your cluster's RBAC, then fail the build when it changes for the worse.
 </title>
-<meta name="description" content="Dumps and diffs Kubernetes RBAC into readable reports: wildcard grants, cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus who-can queries and snapshot diffing for change tracking.">
+<meta name="description" content="Snapshots Kubernetes RBAC to a deterministic JSON file you commit to git, then diffs two snapshots — or one against the live cluster — under a policy that fails CI on new cluster-admin bindings, wildcards, escalation verbs and anonymous grants.">
 <!-- The palette lives in the docs theme, so the splash and /docs/ cannot drift
      apart. The path is relative to the *deployed* layout: splash at /, rendered
      docs at /docs/. -->
@@ -48,12 +47,13 @@ footer{margin-top:2.2rem;color:#5c6684;font-size:.82rem}
 <div class="card">
   <h1>🔎 rbac-auditor</h1>
   <p class="tagline">
-    Kubernetes RBAC as a weekly markdown report a human actually reads, plus who-can queries and snapshot diffs for
-    drift.
+    Commit your cluster's RBAC, then fail the build when it changes for the worse.
   </p>
   <p class="desc">
-    Dumps and diffs Kubernetes RBAC into readable reports: wildcard grants, cluster-admin bindings, unused
-    ServiceAccounts, dangling bindings, plus who-can queries and snapshot diffing for change tracking.
+    Snapshots Roles, ClusterRoles, bindings and ServiceAccounts to a deterministic JSON file you keep in git. Diffs two
+    snapshots — or a committed one against the live cluster — and applies a policy: a new cluster-admin binding, a new
+    wildcard, a new bind/escalate/impersonate grant or a new anonymous binding exits non-zero. Point-in-time queries are
+    left to rakkess, rbac-tool and rbac-lookup.
   </p>
   <div class="install-label">Install</div>
   <pre><code>make build</code></pre>
