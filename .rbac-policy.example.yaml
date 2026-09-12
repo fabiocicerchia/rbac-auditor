@@ -8,6 +8,10 @@
 # allow. Taking a grant away never fails a build, and neither does narrowing
 # one: dropping verbs, replacing `*` with named resources, restricting a rule
 # to specific resourceNames, or splitting a rule in two are all silent.
+#
+# `rbac-audit baseline` applies this same file to a whole cluster rather than
+# to what changed in it, by treating everything as newly added. Same rules,
+# same exemptions, same exit code.
 
 version: 1
 
@@ -37,6 +41,28 @@ rules:
     enabled: true
     fail: true
     subjects: [system:anonymous, system:unauthenticated]
+
+  # A binding naming a ServiceAccount that does not exist. Inert today, and a
+  # live grant the moment somebody creates one with that name in that
+  # namespace — Kubernetes accepts the binding and never warns.
+  dangling-binding:
+    enabled: true
+    fail: true
+
+  # A ServiceAccount no pod mounts: a credential nobody is watching.
+  #
+  # Warns rather than blocks. It is hygiene, not escalation, and on a first
+  # `baseline` it is usually the longest list — a gate that is red on day one
+  # is a gate that gets switched off, taking the other rules with it.
+  #
+  # It needs the cluster's pods, which a snapshot does not carry. Run against
+  # files it is reported as "not checked", never as passed.
+  unused-service-account:
+    enabled: true
+    fail: false
+    # `default` is always ignored by default: every namespace has one, and a
+    # pod naming no account gets it.
+    ignore: [default]
 
 # Relaxing the policy, in order of how little you should reach for it:
 #

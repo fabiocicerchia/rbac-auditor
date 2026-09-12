@@ -29,14 +29,20 @@ are krew-installable and have vendors behind them:
 | list every wildcard grant in the cluster  | [rbac-tool][rbac-tool] `analysis`                            |
 | visualise who reaches what                | [rbac-tool][rbac-tool] `viz`                                 |
 
-Earlier releases of rbac-auditor shipped a `who-can` query, a findings
-`report` (wildcard grants, cluster-admin bindings, unused ServiceAccounts,
-dangling bindings), an HTML renderer and an S3 upload. **They are gone as of
-2.0.** They duplicated the tools above and did it worse — no aggregated
-ClusterRole resolution, no API discovery.
+Earlier releases shipped a `who-can` query, a standalone wildcard listing, an
+HTML renderer and an S3 upload. **Those are gone as of 2.0.** `who-can`
+duplicated the tools above and did it worse — it did not resolve aggregated
+ClusterRoles, so it silently under-reported on a security question. The HTML
+renderer and the S3 upload were rendering and delivery, not auditing.
 
-What none of those tools do is answer *what changed since last week, and is any
-of it dangerous*. That is the whole of this one.
+Two findings from the old `report` are **not** covered by those tools, so they
+came back as policy rules rather than being dropped: a binding that names a
+ServiceAccount which does not exist, and a ServiceAccount no pod mounts. Both
+correlate RBAC against cluster inventory, which is not what an RBAC query tool
+does.
+
+What none of those tools do at all is answer *what changed since last week, and
+is any of it dangerous*. That is the point of this one.
 
 [rakkess]: https://github.com/corneliusweig/rakkess
 [rbac-tool]: https://github.com/alcideio/rbac-tool
@@ -44,16 +50,18 @@ of it dangerous*. That is the whole of this one.
 
 ## Commands
 
-| Command                              | Output                                                    |
-| ------------------------------------ | --------------------------------------------------------- |
-| `snapshot`                           | deterministic JSON of the cluster's RBAC, for committing  |
-| `diff OLD`                           | that snapshot against the live cluster                    |
-| `diff OLD NEW`                       | two snapshots, no cluster needed                          |
-| `diff OLD [NEW] --subject KIND/NAME` | the same diff as a resource × verb matrix for one subject |
+| Command                              | Output                                                     |
+| ------------------------------------ | ---------------------------------------------------------- |
+| `snapshot`                           | deterministic JSON of the cluster's RBAC, for committing   |
+| `baseline`                           | the whole cluster judged by the policy — the day-one audit |
+| `diff OLD`                           | that snapshot against the live cluster                     |
+| `diff OLD NEW`                       | two snapshots, no cluster needed                           |
+| `diff OLD [NEW] --subject KIND/NAME` | the same diff as a resource × verb matrix for one subject  |
 
-Add `--json PATH` to any `diff` for the machine-readable version (`-` for
-stdout), and `--policy PATH` to point at a policy other than
-`./.rbac-policy.yaml`.
+`baseline` and `diff` take the same flags: `--json PATH` for the
+machine-readable version (`-` for stdout), `--policy PATH` to point at a policy
+other than `./.rbac-policy.yaml`, `--no-policy` to report without gating on it,
+and `--subject KIND/NAME` to scope to one subject.
 
 ## Install
 
@@ -65,6 +73,9 @@ make build                       # …or build the image locally
 ## Usage
 
 ```sh
+# day one: what is already wrong, before there is anything to diff against
+rbac-audit baseline
+
 # take a snapshot and commit it
 rbac-audit snapshot -o rbac/prod.json
 git add rbac/prod.json && git commit -m "chore(rbac): weekly snapshot"
@@ -99,15 +110,28 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 ## The policy
 
-`diff` fails the build (exit 2) on any of these, out of the box:
+`diff` and `baseline` fail the build (exit 2) on any of these, out of the box:
 
 - a new binding to `cluster-admin`
 - a new rule with `*` in `verbs`, `resources` or `apiGroups`
 - a new grant of `bind`, `escalate` or `impersonate`
 - a new binding to `system:anonymous` or `system:unauthenticated`
+- a binding naming a ServiceAccount that does not exist — inert today, a live
+  grant the moment somebody creates one with that name
 
-Only *additions* are judged: taking a grant away never fails a build. Every
-rule can be exempted per object, downgraded to a warning, or turned off — see
+and warn, without failing, on:
+
+- a ServiceAccount no pod mounts: a credential nobody is watching. Hygiene
+  rather than escalation, and usually the longest list on a first `baseline`
+
+That last rule needs the cluster's pods, which a snapshot deliberately does not
+carry — pod names change on every rollout and a committed snapshot has to be
+stable. Against a live cluster it runs; against files it is reported as **not
+checked**, never as passed.
+
+Only *additions* are judged, and "addition" means a permission the cluster did
+not already allow: narrowing a rule is silent. Every rule can be exempted per
+object, downgraded to a warning, or turned off — see
 [`.rbac-policy.example.yaml`](.rbac-policy.example.yaml) and
 [Getting Started](docs/getting-started.md#relaxing-the-policy).
 

@@ -4,6 +4,9 @@
 Commands:
   snapshot            deterministic JSON of Roles, ClusterRoles, bindings and
                       ServiceAccounts, meant to be committed to a repository
+  baseline [SNAP]     apply the policy to a whole cluster rather than to what
+                      changed in it — the day-one audit, before there is
+                      anything to diff against
   diff OLD [NEW]      compare two snapshots, or a snapshot against the live
                       cluster: a readable diff, a machine-readable one, and an
                       exit code decided by a policy file
@@ -44,6 +47,10 @@ DIFF_KIND = "RbacDiff"
 
 # Policy file looked for in the working directory when --policy is not given.
 POLICY_FILE = ".rbac-policy.yaml"
+
+# Every namespace has one and it is never "unused"; a pod that names no
+# ServiceAccount gets it. Both readings have to stay the same string.
+DEFAULT_SERVICE_ACCOUNT = "default"
 
 # Exit codes, sysexits(3) names in the comments. 2 is not a sysexits code and
 # is not free to move: docs/architecture.md documents it as the policy gate,
@@ -220,6 +227,24 @@ def capture(context=None):
         items = [normalize(obj) for obj in kubectl_json(resource, context)]
         snap[key] = sorted(items, key=object_id)
     return snap
+
+
+def capture_pod_service_accounts(context=None):
+    """{(namespace, serviceAccountName)} for every pod in the cluster.
+
+    Deliberately *not* part of the snapshot. Pod names carry a fresh random
+    suffix on every rollout, so committing them would make each snapshot diff
+    enormous and meaningless — the opposite of the one property the file has to
+    have. This is read at evaluation time instead, which is why the check that
+    needs it only runs when a cluster is there to read.
+    """
+    return {
+        (
+            pod["metadata"]["namespace"],
+            pod["spec"].get("serviceAccountName", DEFAULT_SERVICE_ACCOUNT),
+        )
+        for pod in kubectl_json("pods", context)
+    }
 
 
 def dump_snapshot(snap):
@@ -593,6 +618,17 @@ DEFAULT_POLICY = {
             "fail": True,
             "subjects": ["system:anonymous", "system:unauthenticated"],
         },
+        "dangling-binding": {"enabled": True, "fail": True},
+        # Hygiene rather than escalation, so it warns by default where the
+        # others block: an unused ServiceAccount is a credential nobody is
+        # watching, not a privilege somebody just gained. On a first `baseline`
+        # it is also usually the longest list, and a gate that is red on day
+        # one is a gate that gets switched off.
+        "unused-service-account": {
+            "enabled": True,
+            "fail": False,
+            "ignore": [DEFAULT_SERVICE_ACCOUNT],
+        },
     },
     "exempt": [],
 }
@@ -778,7 +814,7 @@ def collapse_violations(violations):
 WILDCARD_FIELDS = {"verbs": "verb", "resources": "resource", "apiGroups": "apiGroup"}
 
 
-def check_cluster_admin_binding(change, settings):
+def check_cluster_admin_binding(change, settings, state):
     """A subject newly bound to cluster-admin (or another named role)."""
     ref = change.get("roleRef")
     if not ref or ref.get("name") not in settings["roles"]:
@@ -794,7 +830,7 @@ def check_cluster_admin_binding(change, settings):
         )
 
 
-def check_wildcard(change, settings):
+def check_wildcard(change, settings, state):
     """A newly granted permission carrying `*` in a field the policy watches."""
     for grant in change.get("grants", {}).get("added", []):
         hit = [
@@ -811,7 +847,7 @@ def check_wildcard(change, settings):
             )
 
 
-def check_escalating_verbs(change, settings):
+def check_escalating_verbs(change, settings, state):
     """A new grant of bind / escalate / impersonate.
 
     Only literal verbs: a `*` verb grants these too, and the wildcard rule
@@ -828,7 +864,57 @@ def check_escalating_verbs(change, settings):
             )
 
 
-def check_anonymous_subject(change, settings):
+def check_dangling_binding(change, settings, state):
+    """A binding pointing at a ServiceAccount that does not exist.
+
+    Kubernetes accepts this without complaint and never warns when the subject
+    later appears — the binding simply starts granting. Harmless today, a live
+    privilege grant the moment somebody creates a ServiceAccount with that name
+    in that namespace.
+    """
+    accounts = state["serviceAccounts"]
+    for subject in change.get("subjects", {}).get("added", []):
+        if subject.get("kind") != "ServiceAccount":
+            continue
+        key = (subject.get("namespace", ""), subject.get("name", ""))
+        if key not in accounts:
+            ref = change.get("roleRef") or {}
+            yield _violation(
+                "dangling-binding",
+                change,
+                f"names {subject_str(subject)}, which does not exist — "
+                f"creating it would grant {ref.get('kind')}/{ref.get('name')}",
+                subject=subject_str(subject),
+            )
+
+
+def check_unused_service_account(change, settings, state):
+    """A ServiceAccount no pod mounts: a credential nobody is watching.
+
+    Needs the cluster's pods, which the snapshot deliberately does not carry,
+    so this is the one rule that cannot run files-only. `evaluate` reports it
+    as skipped rather than passing it silently.
+
+    Only newly seen accounts, like every other rule. In `baseline` that is all
+    of them, which is the inventory you want on a first audit; in `diff` it is
+    the ones just created.
+    """
+    if change["kind"] != "ServiceAccount" or change["change"] != "added":
+        return
+    if change["name"] in settings["ignore"]:
+        return
+    if (change["namespace"], change["name"]) in state["podServiceAccounts"]:
+        return
+    yield _violation(
+        "unused-service-account",
+        change,
+        f"no pod mounts {change['namespace']}/{change['name']} — "
+        "a token nobody is watching",
+        subject=f"ServiceAccount {change['namespace']}/{change['name']}",
+    )
+
+
+def check_anonymous_subject(change, settings, state):
     """A new binding to system:anonymous or system:unauthenticated.
 
     subjects.added, not newlyGranted: this rule watches the subject, and a
@@ -852,7 +938,15 @@ CHECKS = {
     "wildcard": check_wildcard,
     "escalating-verbs": check_escalating_verbs,
     "anonymous-subject": check_anonymous_subject,
+    "dangling-binding": check_dangling_binding,
+    "unused-service-account": check_unused_service_account,
 }
+
+# Rules needing something a snapshot does not carry, and the state key that
+# supplies it. When it is missing the rule cannot run, and a check that
+# silently does not run is the failure this tool exists to prevent — so
+# `evaluate` returns it as skipped and the report says so.
+CHECK_REQUIRES = {"unused-service-account": "podServiceAccounts"}
 
 
 def _matches(pattern, value):
@@ -881,20 +975,58 @@ def exempted_by(violation, policy):
     return None
 
 
-def evaluate(changes, policy):
-    """(violations, exempted) for a change list, in a stable order.
+def evaluation_state(snap, pod_service_accounts=None):
+    """What the checks need beyond the change itself.
+
+    `serviceAccounts` comes from the snapshot being judged. `podServiceAccounts`
+    can only come from a live cluster, and is None when there was not one —
+    which is how `evaluate` knows to report a rule as skipped.
+    """
+    return {
+        "serviceAccounts": {
+            (account.get("namespace", ""), account["name"])
+            for account in snap.get("serviceAccounts") or []
+        },
+        "podServiceAccounts": pod_service_accounts,
+    }
+
+
+def runnable_rules(policy, state):
+    """(names to run, [(name, why it could not run)]) for an enabled policy."""
+    runnable, skipped = [], []
+    for name in sorted(policy["rules"]):
+        if not policy["rules"][name].get("enabled", True):
+            continue
+        needs = CHECK_REQUIRES.get(name)
+        if needs and state.get(needs) is None:
+            why = (
+                "needs the cluster's pods, which a snapshot does not carry — "
+                "run it against a live cluster"
+            )
+            skipped.append((name, why))
+        else:
+            runnable.append(name)
+    return runnable, skipped
+
+
+def evaluate(changes, policy, state=None):
+    """(violations, exempted, skipped) for a change list, in a stable order.
 
     Only additions are judged. Removing a grant cannot be the thing a security
     gate blocks, and a policy that fails a build for taking cluster-admin away
     is a policy people route around.
+
+    `skipped` names the enabled rules that could not run at all. They are not
+    failures and they are not passes, and reporting them as either would be a
+    lie about what was checked.
     """
+    state = state or evaluation_state({})
     violations, exempted = [], []
+    names, skipped = runnable_rules(policy, state)
     for change in changes:
-        for name in sorted(policy["rules"]):
+        for name in names:
             settings = policy["rules"][name]
-            if not settings.get("enabled", True):
-                continue
-            for violation in collapse_violations(CHECKS[name](change, settings)):
+            for violation in collapse_violations(CHECKS[name](change, settings, state)):
                 violation["fail"] = bool(settings.get("fail", True))
                 entry = exempted_by(violation, policy)
                 if entry:
@@ -902,7 +1034,7 @@ def evaluate(changes, policy):
                     exempted.append(violation)
                 else:
                     violations.append(violation)
-    return violations, exempted
+    return violations, exempted, skipped
 
 
 def gating(violations):
@@ -1163,6 +1295,17 @@ def render_changes(changes):
     return out
 
 
+def render_skipped(skipped):
+    """Rules that could not run. Never silent: "not checked" and "checked and
+    clean" are different answers, and only one of them is reassuring."""
+    if not skipped:
+        return []
+    out = ["", f"Not checked ({len(skipped)})"]
+    for name, why in skipped:
+        out.append(f"  [{name}] {why}")
+    return out
+
+
 def render_violations(violations, exempted):
     """The verdict, and then what was let through and on whose authority.
 
@@ -1199,7 +1342,7 @@ def summarize(changes, violations, exempted):
     return counts
 
 
-def render_report(changes, violations, exempted, header, matrix=None):
+def render_report(changes, violations, exempted, header, matrix=None, skipped=()):
     out = list(header)
     out.append("")
     if matrix is None:
@@ -1208,6 +1351,7 @@ def render_report(changes, violations, exempted, header, matrix=None):
         out += render_matrix(*matrix)
     out.append("")
     out += render_violations(violations, exempted)
+    out += render_skipped(skipped)
     counts = summarize(changes, violations, exempted)
     out.append("")
     # Say when violations were found but none of them gate, so a green build
@@ -1242,7 +1386,9 @@ def public_change(change):
     return out
 
 
-def machine_report(changes, violations, exempted, source, target, subject, matrix):
+def machine_report(
+    changes, violations, exempted, source, target, subject, matrix, skipped=()
+):
     out = {
         "apiVersion": SNAPSHOT_VERSION,
         "kind": DIFF_KIND,
@@ -1252,6 +1398,7 @@ def machine_report(changes, violations, exempted, source, target, subject, matri
         "changes": [public_change(change) for change in changes],
         "violations": violations,
         "exempted": exempted,
+        "notChecked": [{"rule": name, "why": why} for name, why in skipped],
     }
     if subject:
         out["subject"] = "/".join(part for part in subject if part)
@@ -1284,12 +1431,21 @@ def run_snapshot(args):
     sys.exit(EXIT_OK)
 
 
-def run_diff(args):
-    # Everything that can be rejected from the command line alone is rejected
-    # first: a malformed --subject or an unreadable policy must not exit 69
-    # because reading the cluster failed, and must not cost a cluster read to
-    # find out about.
-    subject = parse_subject(args.subject) if args.subject else None
+def empty_snapshot():
+    """A snapshot of a cluster with no RBAC in it.
+
+    What `baseline` compares against: with nothing on the left, every object is
+    an addition and every permission is newly granted, so the same rules that
+    judge a week's drift judge the whole cluster.
+    """
+    snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
+    for key in SECTION_KEYS:
+        snap[key] = []
+    return snap
+
+
+def load_policy_for(args):
+    """The policy, with --no-policy applied. Read before any cluster is."""
     policy = load_policy(args.policy)
     if args.no_policy:
         # Downgrade, do not disable. The point of this flag is to read what the
@@ -1298,13 +1454,11 @@ def run_diff(args):
         # deciding the exit code.
         for settings in policy["rules"].values():
             settings["fail"] = False
+    return policy
 
-    old = load_snapshot(args.old)
-    if args.new:
-        new, target = load_snapshot(args.new), args.new
-    else:
-        new, target = capture(args.context), "live cluster"
 
+def report_and_exit(args, old, new, source, target, title, policy, subject, pods):
+    """The half of `diff` and `baseline` that is the same for both."""
     changes = diff_snapshots(old, new)
     matrix = None
     if subject:
@@ -1313,9 +1467,11 @@ def run_diff(args):
             effective_cells(old, subject), effective_cells(new, subject)
         )
 
-    violations, exempted = evaluate(changes, policy)
+    violations, exempted, skipped = evaluate(
+        changes, policy, evaluation_state(new, pods)
+    )
 
-    header = [f"RBAC diff — {args.old} → {target}"]
+    header = [f"{title} — {source} → {target}" if source else f"{title} — {target}"]
     if subject:
         header.append(
             f"Subject: {subject_str({'kind': subject[0], 'namespace': subject[1], 'name': subject[2]})}"
@@ -1325,15 +1481,67 @@ def run_diff(args):
         write_out(
             args.json,
             machine_report(
-                changes, violations, exempted, args.old, target, subject, matrix
+                changes,
+                violations,
+                exempted,
+                source or "an empty cluster",
+                target,
+                subject,
+                matrix,
+                skipped,
             ),
         )
     # `--json -` puts the machine report on stdout; printing the human one
     # there too would corrupt it.
     if args.json != "-":
-        print(render_report(changes, violations, exempted, header, matrix))
+        print(render_report(changes, violations, exempted, header, matrix, skipped))
 
     sys.exit(EXIT_VIOLATIONS if gating(violations) else EXIT_OK)
+
+
+def read_target(args, path):
+    """The snapshot being judged, and what to call it in the report.
+
+    Also the cluster's pods when there is a cluster: they are what the
+    unused-ServiceAccount rule needs, and they are not in any snapshot.
+    """
+    if path:
+        return load_snapshot(path), path, None
+    return (
+        capture(args.context),
+        "live cluster",
+        capture_pod_service_accounts(args.context),
+    )
+
+
+def run_diff(args):
+    # Everything that can be rejected from the command line alone is rejected
+    # first: a malformed --subject or an unreadable policy must not exit 69
+    # because reading the cluster failed, and must not cost a cluster read to
+    # find out about.
+    subject = parse_subject(args.subject) if args.subject else None
+    policy = load_policy_for(args)
+    old = load_snapshot(args.old)
+    new, target, pods = read_target(args, args.new)
+    report_and_exit(
+        args, old, new, args.old, target, "RBAC diff", policy, subject, pods
+    )
+
+
+def run_baseline(args):
+    """Judge a whole cluster, rather than what changed in it.
+
+    Drift detection assumes a good baseline, and on day one nobody has one: a
+    cluster that is already dangerous and stays that way never changes, so a
+    diff never sees it. This compares against an empty cluster, so the same
+    policy reports everything that is true right now.
+    """
+    subject = parse_subject(args.subject) if args.subject else None
+    policy = load_policy_for(args)
+    new, target, pods = read_target(args, args.snapshot)
+    report_and_exit(
+        args, empty_snapshot(), new, "", target, "RBAC baseline", policy, subject, pods
+    )
 
 
 class Parser(argparse.ArgumentParser):
@@ -1368,6 +1576,33 @@ def build_parser():
     snap.add_argument("--context", metavar="NAME", help="kubeconfig context to read")
     snap.set_defaults(func=run_snapshot)
 
+    def add_policy_flags(command, what):
+        """The flags `diff` and `baseline` share. They run the same engine, so
+        a flag on one and not the other would be an accident, not a choice."""
+        command.add_argument(
+            "--policy",
+            metavar="PATH",
+            help=f"policy file (default: ./{POLICY_FILE} if it exists)",
+        )
+        command.add_argument(
+            "--no-policy",
+            action="store_true",
+            help="report what the policy would block, without gating on it",
+        )
+        command.add_argument(
+            "--subject",
+            metavar="KIND/NAME",
+            help=f"scope the {what} to one subject, as a resource x verb matrix",
+        )
+        command.add_argument(
+            "--json",
+            metavar="PATH",
+            help=f"also write the machine-readable {what} (`-` for stdout)",
+        )
+        command.add_argument(
+            "--context", metavar="NAME", help="kubeconfig context to read"
+        )
+
     diff = sub.add_parser("diff", help="compare snapshots and apply the policy")
     diff.add_argument("old", metavar="OLD", help="the snapshot to compare from")
     diff.add_argument(
@@ -1376,28 +1611,20 @@ def build_parser():
         nargs="?",
         help="the snapshot to compare to (default: the live cluster)",
     )
-    diff.add_argument(
-        "--policy",
-        metavar="PATH",
-        help=f"policy file (default: ./{POLICY_FILE} if it exists)",
-    )
-    diff.add_argument(
-        "--no-policy",
-        action="store_true",
-        help="report what the policy would block, without gating on it",
-    )
-    diff.add_argument(
-        "--subject",
-        metavar="KIND/NAME",
-        help="scope the diff to one subject, as a resource x verb matrix",
-    )
-    diff.add_argument(
-        "--json",
-        metavar="PATH",
-        help="also write the machine-readable diff (`-` for stdout)",
-    )
-    diff.add_argument("--context", metavar="NAME", help="kubeconfig context to read")
+    add_policy_flags(diff, "diff")
     diff.set_defaults(func=run_diff)
+
+    baseline = sub.add_parser(
+        "baseline", help="apply the policy to a whole cluster, not just what changed"
+    )
+    baseline.add_argument(
+        "snapshot",
+        metavar="SNAPSHOT",
+        nargs="?",
+        help="the snapshot to judge (default: the live cluster)",
+    )
+    add_policy_flags(baseline, "baseline")
+    baseline.set_defaults(func=run_baseline)
     return parser
 
 

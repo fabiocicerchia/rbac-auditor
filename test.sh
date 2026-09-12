@@ -20,8 +20,13 @@ run() {
     -v "$FIXTURES:/fixtures:ro" -v "$WORK:/out" "$IMAGE" "$@"
 }
 
-# Help text names the two commands there are.
-docker run --rm "$IMAGE" --help 2>&1 | grep -q "{snapshot,diff}"
+# Help text names every command there is.
+for command in snapshot baseline diff; do
+  docker run --rm "$IMAGE" --help 2>&1 | grep -qE "^usage:.*\{.*$command.*\}" || {
+    echo "FAIL: '$command' is missing from the usage line" >&2
+    exit 1
+  }
+done
 
 # The removed commands are refused as usage errors, not run. Grepping the help
 # text would not prove it: the help text names who-can, to say it is gone.
@@ -74,6 +79,29 @@ grep -q "No policy violations." /tmp/narrow.txt
 # --no-policy prints what it would have blocked rather than hiding it.
 run diff /fixtures/before.json /fixtures/after.json --no-policy | grep -q "(warn)"
 
+# baseline judges the whole cluster, not just what changed: everything counts
+# as an addition, so the standing cluster-admin binding is reported.
+run baseline /fixtures/after.json >/tmp/base.txt 2>&1 && rc=0 || rc=$?
+if [ "$rc" -ne 2 ]; then
+  echo "FAIL: baseline on a cluster with a cluster-admin binding should exit 2, got $rc" >&2
+  cat /tmp/base.txt >&2
+  exit 1
+fi
+grep -q "RBAC baseline" /tmp/base.txt
+grep -q "cluster-admin-binding" /tmp/base.txt
+# A rule that cannot run says so rather than passing silently.
+grep -q "Not checked" /tmp/base.txt
+grep -q "unused-service-account" /tmp/base.txt
+
+# A binding to a ServiceAccount that does not exist is a latent privilege grant.
+run diff /fixtures/after.json /fixtures/dangling.json >/tmp/dangle.txt 2>&1 && rc=0 || rc=$?
+if [ "$rc" -ne 2 ]; then
+  echo "FAIL: a new dangling binding should exit 2, got $rc" >&2
+  cat /tmp/dangle.txt >&2
+  exit 1
+fi
+grep -q "dangling-binding" /tmp/dangle.txt
+
 # A --json diff report is not a snapshot, even though it shares the apiVersion.
 run diff /fixtures/before.json /fixtures/after.json --json /out/report.json \
   >/dev/null 2>&1 || true
@@ -87,5 +115,5 @@ if [ "$rc" -ne 65 ]; then
   exit 1
 fi
 
-rm -f /tmp/diff.txt /tmp/narrow.txt
+rm -f /tmp/diff.txt /tmp/narrow.txt /tmp/base.txt /tmp/dangle.txt
 echo PASS

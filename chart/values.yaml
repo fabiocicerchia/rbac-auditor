@@ -72,7 +72,9 @@ rbac:
       resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
       verbs: ["get", "list"]
     - apiGroups: [""]
-      resources: ["serviceaccounts", "namespaces"]
+      # pods: the unused-ServiceAccount rule needs them; they never enter
+      # the snapshot.
+      resources: ["serviceaccounts", "namespaces", "pods"]
       verbs: ["get", "list"]
 
 podSecurityContext:

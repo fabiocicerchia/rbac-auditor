@@ -5,6 +5,10 @@ rbac-audit \- snapshot Kubernetes RBAC and diff it under a policy
 .B rbac-audit snapshot
 .RI [ options ]
 .br
+.B rbac-audit baseline
+.RI [ SNAPSHOT ]
+.RI [ options ]
+.br
 .B rbac-audit diff
 .I OLD
 .RI [ NEW ]
@@ -32,6 +36,15 @@ declares
 which is what distinguishes it from the
 .B \-\-json
 diff report.
+.TP
+.BI baseline " " [ SNAPSHOT ]
+Apply the policy to a whole cluster rather than to what changed in it, by
+comparing it against an empty one: every object counts as an addition, so every
+standing problem is reported. The day-one audit, before there is anything to
+diff against. Reads the live cluster unless a
+.I SNAPSHOT
+is named, and takes the same options as
+.BR diff .
 .TP
 .BI diff " OLD " [ NEW ]
 Compare two snapshots, or
@@ -77,6 +90,31 @@ Also write the machine-readable diff.
 .B \-
 sends it to standard output and suppresses the human report, so the pipe stays
 parseable.
+.SH RULES
+.TP
+.B cluster-admin-binding
+A subject newly bound to cluster-admin. Fails.
+.TP
+.B wildcard
+A new grant with \(aq*\(aq in verbs, resources or apiGroups. Fails.
+.TP
+.B escalating-verbs
+A new grant of bind, escalate or impersonate. Fails.
+.TP
+.B anonymous-subject
+A new binding to system:anonymous or system:unauthenticated. Fails.
+.TP
+.B dangling-binding
+A binding naming a ServiceAccount that does not exist. Inert today and a live
+grant the moment somebody creates one with that name: Kubernetes accepts such a
+binding and never warns when the subject appears. Fails.
+.TP
+.B unused-service-account
+A ServiceAccount no pod mounts \(em a credential nobody is watching. Warns
+rather than fails: hygiene rather than escalation. It needs the cluster\(aqs
+pods, which a snapshot does not carry, so against files it is reported as
+.B "not checked"
+rather than as passed.
 .SH FILES
 .TP
 .I .rbac-policy.yaml

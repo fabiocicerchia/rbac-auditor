@@ -126,6 +126,76 @@ class NoClusterTest(unittest.TestCase):
         self.assertEqual(code, ra.EXIT_VIOLATIONS)
 
 
+class BaselineTest(unittest.TestCase):
+    """Drift detection assumes a good baseline; on day one nobody has one. A
+    cluster that is already dangerous and never changes is invisible to a diff,
+    so `baseline` judges the whole thing against the same policy."""
+
+    def test_it_judges_a_whole_snapshot(self):
+        code, out = run(["baseline", AFTER])
+        self.assertEqual(code, ra.EXIT_VIOLATIONS)
+        self.assertIn("RBAC baseline", out)
+        # Everything is an addition, so every standing problem is reported —
+        # including the ones a before/after diff of the same fixtures misses.
+        self.assertIn("cluster-admin-binding", out)
+        self.assertIn("anonymous-subject", out)
+        self.assertIn("ClusterRole/cluster-admin", out)
+
+    def test_a_clean_cluster_baselines_clean(self):
+        clean = {"apiVersion": ra.SNAPSHOT_VERSION, "kind": ra.SNAPSHOT_KIND}
+        for key in ra.SECTION_KEYS:
+            clean[key] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clean.json"
+            path.write_text(json.dumps(clean))
+            code, out = run(["baseline", str(path)])
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertIn("No changes.", out)
+
+    def test_it_says_which_rules_it_could_not_run(self):
+        """Against a file there are no pods, so the unused-ServiceAccount rule
+        cannot run. Reporting it as a pass would be a lie about what was
+        checked."""
+        code, out = run(["baseline", AFTER])
+        self.assertIn("Not checked (1)", out)
+        self.assertIn("unused-service-account", out)
+        self.assertIn("live cluster", out)
+        self.assertEqual(code, ra.EXIT_VIOLATIONS)
+
+    def test_the_machine_report_names_them_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.json"
+            run(["baseline", AFTER, "--json", str(path)])
+            data = json.loads(path.read_text())
+        self.assertEqual(
+            [entry["rule"] for entry in data["notChecked"]], ["unused-service-account"]
+        )
+        self.assertEqual(data["from"], "an empty cluster")
+        self.assertEqual(data["to"], AFTER)
+
+    def test_no_policy_works_the_same_way(self):
+        code, out = run(["baseline", AFTER, "--no-policy"])
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertIn("(warn)", out)
+
+    def test_it_reads_the_live_cluster_when_given_no_file(self):
+        snap = ra.load_snapshot(AFTER)
+        with (
+            mock.patch("rbac_audit.capture", return_value=snap) as capture_mock,
+            mock.patch(
+                "rbac_audit.capture_pod_service_accounts", return_value=set()
+            ) as pods_mock,
+        ):
+            code, out = run(["baseline"])
+        capture_mock.assert_called_once()
+        # The pods it needs are read from the cluster, never from the snapshot.
+        pods_mock.assert_called_once()
+        self.assertEqual(code, ra.EXIT_VIOLATIONS)
+        self.assertIn("live cluster", out)
+        self.assertNotIn("Not checked", out)
+        self.assertIn("unused-service-account", out)
+
+
 class InputOrderTest(unittest.TestCase):
     """What the command line alone can reject is rejected before the cluster
     is read: a typo must not exit 69 because kubectl failed, and must not cost

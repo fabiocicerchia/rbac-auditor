@@ -9,6 +9,7 @@ kubectl get {roles,clusterroles,rolebindings,clusterrolebindings,
         └──► capture()  — normalised, sorted, no timestamps
                  │
                  ├── snapshot          the snapshot itself, as committable JSON
+                 ├── baseline [SNAP]   the whole cluster, judged by the policy
                  └── diff OLD [NEW]    snapshot vs snapshot, or vs the cluster
                           │
                           ├── changes      added / removed / changed objects
@@ -16,10 +17,26 @@ kubectl get {roles,clusterroles,rolebindings,clusterrolebindings,
                           └── --subject    one subject, as a resource × verb matrix
 ```
 
+## `baseline` is `diff` against nothing
+
+Drift detection assumes a good baseline, and on day one nobody has one. A
+cluster that is already dangerous and stays that way never changes, so a diff
+never sees it — the tool would be silent about the worst cluster it will ever
+meet.
+
+`baseline` compares against an empty cluster. Every object is an addition and
+every permission is newly granted, so the same rules that judge a week's drift
+judge the whole thing: no second code path, and no second set of findings to
+keep in step. It is the same engine with `empty_snapshot()` on the left.
+
+That makes the first run noisy by construction — it is the entire cluster —
+but it is noise you work through once to reach a committed snapshot, after
+which `diff` is zero and stays zero. That is the difference from the old
+`report`, whose findings never went away and therefore never got read.
+
 ## The scope, and what was deliberately removed
 
-Versions before 2.0 also shipped `who-can`, a findings `report` (wildcard
-grants, cluster-admin bindings, unused ServiceAccounts, dangling bindings), an
+Versions before 2.0 also shipped `who-can`, a standalone wildcard listing, an
 HTML renderer and an S3 upload. Those were removed, not deprecated.
 
 [rakkess][rakkess], [rbac-tool][rbac-tool] and [rbac-lookup][rbac-lookup]
@@ -32,6 +49,13 @@ saying it was a worse version of something that already existed.
 What none of them do is track RBAC *over time*. A snapshot in git and a diff
 with a policy gate is a different job: it turns drift into a pull request
 instead of a query somebody has to remember to run.
+
+Two findings from the old `report` were **not** covered by those tools and came
+back as policy rules rather than being dropped: `dangling-binding` and
+`unused-service-account`. Both correlate RBAC against cluster inventory —
+whether a ServiceAccount exists, whether a pod mounts it — which is not
+something an RBAC query tool answers. Removing them on the grounds that rakkess
+or rbac-tool would cover them was simply wrong.
 
 [rakkess]: https://github.com/corneliusweig/rakkess
 [rbac-tool]: https://github.com/alcideio/rbac-tool
@@ -156,14 +180,16 @@ stay two findings, because they are two different things to go and fix.
 Four rules, all on and all blocking by default, because a gate that ships
 permissive is a gate nobody ever tightens:
 
-| Rule                    | Fails on                                                        |
-| ----------------------- | --------------------------------------------------------------- |
-| `cluster-admin-binding` | a subject newly bound to `cluster-admin`                        |
-| `wildcard`              | a new rule with `*` in `verbs`, `resources` or `apiGroups`      |
-| `escalating-verbs`      | a new grant of `bind`, `escalate` or `impersonate`              |
-| `anonymous-subject`     | a new binding to `system:anonymous` or `system:unauthenticated` |
+| Rule                     | Reports                                                         | Default |
+| ------------------------ | --------------------------------------------------------------- | ------- |
+| `cluster-admin-binding`  | a subject newly bound to `cluster-admin`                        | blocks  |
+| `wildcard`               | a new grant with `*` in `verbs`, `resources` or `apiGroups`     | blocks  |
+| `escalating-verbs`       | a new grant of `bind`, `escalate` or `impersonate`              | blocks  |
+| `anonymous-subject`      | a new binding to `system:anonymous` or `system:unauthenticated` | blocks  |
+| `dangling-binding`       | a binding naming a ServiceAccount that does not exist           | blocks  |
+| `unused-service-account` | a ServiceAccount no pod mounts                                  | warns   |
 
-Two decisions behind them:
+Four decisions behind them:
 
 **Only additions are judged.** A gate that fails a build for *removing*
 cluster-admin is a gate people route around.
@@ -171,6 +197,16 @@ cluster-admin is a gate people route around.
 **`escalating-verbs` ignores `*`.** A wildcard verb grants `bind`, `escalate`
 and `impersonate` too, but the `wildcard` rule already reports that grant.
 Saying it twice trains people to skim the list.
+
+**`unused-service-account` warns where the rest block.** The other five say
+something got more dangerous; this one says something is untidy. On a first
+`baseline` it is also usually the longest list, and a gate that is red on day
+one is a gate somebody switches off — taking the other five with it.
+
+**`dangling-binding` blocks.** It looks like hygiene and is not: Kubernetes
+accepts a binding to a subject that does not exist and never warns when the
+subject later appears. The binding simply starts granting. It is a privilege
+grant with a trigger attached.
 
 `cluster-admin-binding` reads `newlyGranted` and `anonymous-subject` reads
 `subjects.added`, which is not an inconsistency. The first watches *the role*:
@@ -193,6 +229,29 @@ flag a binding to a ClusterRole named `admin`).
 The flag exists so somebody can read what the gate *would* have blocked before
 switching it on, which only works if the violations are still printed — marked
 `(warn)`, with `(none gating)` on the summary line.
+
+## What a snapshot cannot answer
+
+`unused-service-account` needs the cluster's pods. They are not in the snapshot
+and will not be: a pod name carries a fresh random suffix on every rollout, so
+committing them would make each snapshot diff enormous and meaningless —
+destroying the one property the file exists to have. They are read at
+evaluation time instead, by `capture_pod_service_accounts()`, and only when
+there is a cluster to read.
+
+So the rule cannot run files-only. `evaluate` returns such rules as **skipped**
+and both reports name them:
+
+```text
+Not checked (1)
+  [unused-service-account] needs the cluster's pods, which a snapshot does not
+  carry — run it against a live cluster
+```
+
+Not a pass and not a failure. A security check that silently does not run is
+the failure mode this tool is built against, and "not checked" and "checked and
+clean" are different answers — only one of them is reassuring. A rule turned
+off on purpose is not reported here; only one that could not run.
 
 ## The subject matrix
 

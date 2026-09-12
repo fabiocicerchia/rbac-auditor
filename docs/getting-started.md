@@ -5,6 +5,25 @@
 A cluster and read access to RBAC — or, for the files-only workflow, nothing at
 all. kubectl is in the image and uses whatever credentials you give it.
 
+## Day one: what is already wrong
+
+Before there is anything to diff against, audit the cluster as it stands:
+
+```sh
+rbac-audit baseline
+```
+
+`baseline` judges the whole cluster with the same policy `diff` uses, by
+comparing it against an empty one — every object counts as an addition, so
+every standing problem is reported. It takes the same flags as `diff`, and
+accepts a snapshot file instead of a cluster: `rbac-audit baseline rbac/prod.json`.
+
+Expect the first run to be long. It is the entire cluster, not a week of
+change. That is the point: you work through it once, commit the snapshot, and
+from then on `diff` is quiet unless something moves.
+
+Start with `--no-policy` if you would rather read it than be blocked by it.
+
 ## Take a snapshot and commit it
 
 ```sh
@@ -137,14 +156,16 @@ thing it does without `--subject`.
 
 ## The policy
 
-With no policy file, these four rules are on and all of them fail the build:
+With no policy file, these six rules are on:
 
-| Rule                    | Fails on                                                        |
-| ----------------------- | --------------------------------------------------------------- |
-| `cluster-admin-binding` | a subject newly bound to `cluster-admin`                        |
-| `wildcard`              | a new rule with `*` in `verbs`, `resources` or `apiGroups`      |
-| `escalating-verbs`      | a new grant of `bind`, `escalate` or `impersonate`              |
-| `anonymous-subject`     | a new binding to `system:anonymous` or `system:unauthenticated` |
+| Rule                     | Reports                                                         | Default |
+| ------------------------ | --------------------------------------------------------------- | ------- |
+| `cluster-admin-binding`  | a subject newly bound to `cluster-admin`                        | fails   |
+| `wildcard`               | a new grant with `*` in `verbs`, `resources` or `apiGroups`     | fails   |
+| `escalating-verbs`       | a new grant of `bind`, `escalate` or `impersonate`              | fails   |
+| `anonymous-subject`      | a new binding to `system:anonymous` or `system:unauthenticated` | fails   |
+| `dangling-binding`       | a binding naming a ServiceAccount that does not exist           | fails   |
+| `unused-service-account` | a ServiceAccount no pod mounts                                  | warns   |
 
 Only additions are judged, and "addition" means a permission the cluster did
 not already allow. Removing a grant never fails a build, and neither does
@@ -152,7 +173,23 @@ narrowing one: dropping verbs from a rule, replacing `*` with named resources,
 restricting a rule to specific `resourceNames`, or splitting one rule into two
 that grant the same thing are all silent.
 
-`diff` reads `./.rbac-policy.yaml` if it is there, or `--policy PATH`. Copy
+`unused-service-account` warns instead of failing: it is hygiene rather than
+escalation, and on a first `baseline` it is usually the longest list — a gate
+that is red on day one is a gate that gets switched off. `dangling-binding`
+does fail, because it is not hygiene: Kubernetes accepts a binding to a
+ServiceAccount that does not exist and never warns when one later appears, so
+it is a privilege grant with a trigger attached.
+
+`unused-service-account` also needs the cluster's pods, which a snapshot does
+not carry. Run against files it is reported as **not checked** rather than as
+passed:
+
+```text
+Not checked (1)
+  [unused-service-account] needs the cluster's pods, which a snapshot does not carry — run it against a live cluster
+```
+
+`diff` and `baseline` read `./.rbac-policy.yaml` if it is there, or `--policy PATH`. Copy
 [`.rbac-policy.example.yaml`](https://github.com/fabiocicerchia/rbac-auditor/blob/main/.rbac-policy.example.yaml)
 to start from the defaults written out in full.
 
@@ -212,7 +249,9 @@ rules:
 
 Every rule's list is configurable the same way: `roles` for
 `cluster-admin-binding`, `verbs` for `escalating-verbs`, `subjects` for
-`anonymous-subject`. They are lists, and the file is rejected if you write a
+`anonymous-subject`, `ignore` for `unused-service-account` (which already
+ignores `default`, since every namespace has one and a pod naming no account
+gets it). They are lists, and the file is rejected if you write a
 bare string — `verbs: bind` instead of `verbs: [bind]` would turn a membership
 test into a substring one, and a security check that quietly stops matching is
 the thing this tool exists to prevent.

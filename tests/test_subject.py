@@ -70,7 +70,9 @@ class ScopeTest(unittest.TestCase):
         scoped = ra.scope_changes(
             self.changes, ra.subject_scope(self.old, self.new, DEPLOYER)
         )
-        violations, _ = ra.evaluate(scoped, ra.merge_policy(None))
+        violations, _, _ = ra.evaluate(
+            scoped, ra.merge_policy(None), ra.evaluation_state(self.new, set())
+        )
         self.assertIn("cluster-admin-binding", {v["rule"] for v in violations})
         self.assertTrue(ra.gating(violations))
 

@@ -48,8 +48,10 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: [roles, clusterroles, rolebindings, clusterrolebindings]
     verbs: [get, list]
+  # pods is for the unused-ServiceAccount rule: an account no pod mounts
+  # cannot be found from RBAC objects alone. They never enter the snapshot.
   - apiGroups: [""]
-    resources: [serviceaccounts]
+    resources: [serviceaccounts, pods]
     verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

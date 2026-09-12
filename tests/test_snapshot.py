@@ -154,6 +154,15 @@ class FileFormatTest(unittest.TestCase):
         for word in ("timestamp", "taken_at", "creationtimestamp", "generated"):
             self.assertNotIn(word, text)
 
+    def test_pods_are_not_in_the_snapshot(self):
+        """The unused-ServiceAccount rule needs pods, and it still must not put
+        them here: a pod name carries a fresh random suffix on every rollout,
+        so committing them would make each snapshot diff enormous and
+        meaningless — the one property this file has to have."""
+        self.assertNotIn("pods", self.snap)
+        self.assertNotIn("pods", ra.SECTION_KEYS)
+        self.assertNotIn("pods", [resource for _k, _n, resource, _f in ra.SECTIONS])
+
     def test_key_order_does_not_depend_on_input_order(self):
         shuffled = dict(reversed(list(self.snap.items())))
         self.assertEqual(ra.dump_snapshot(shuffled), ra.dump_snapshot(self.snap))
