@@ -84,6 +84,7 @@ NAMESPACE  RESOURCE                          *  bind escalate get list patch
 *          *.*                               +   .      .      .   .     .
 ci         deployments.apps                  .   .      .      =   =     +
 ci         roles.rbac.authorization.k8s.io   .   +      +      .   .     .
+ci         secrets.*                         .   .      .      +   .     .
 
   + gained   - lost   = unchanged   . not granted
 ```

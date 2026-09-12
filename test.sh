@@ -7,7 +7,18 @@ set -eu
 IMAGE="${1:?usage: test.sh <image:tag>}"
 FIXTURES="$(CDPATH='' cd -- "$(dirname -- "$0")/tests/fixtures" && pwd)"
 
-run() { docker run --rm -v "$FIXTURES:/fixtures:ro" "$IMAGE" "$@"; }
+# WORK is mounted writable at /out, so a file the container produces can be
+# fed back to the container. A host path passed as an argument would not exist
+# inside it.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+# --user: the image declares USER 10001, which cannot write to a directory
+# mktemp created for whoever is running this. Running as the caller is also how
+# the docs tell people to invoke it.
+run() {
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -v "$FIXTURES:/fixtures:ro" -v "$WORK:/out" "$IMAGE" "$@"
+}
 
 # Help text names the two commands there are.
 docker run --rm "$IMAGE" --help 2>&1 | grep -q "{snapshot,diff}"
@@ -49,5 +60,32 @@ run diff /fixtures/before.json /fixtures/after.json \
 # A snapshot compared with itself is clean, and says so with exit 0.
 run diff /fixtures/before.json /fixtures/before.json | grep -q "No changes."
 
-rm -f /tmp/diff.txt
+# Tightening RBAC must never fail the gate: narrowed.json drops a verb, drops
+# an escalation verb and restricts a rule to one resourceName. The rules all
+# change, so a rule-level diff would call the survivors new grants.
+run diff /fixtures/after.json /fixtures/narrowed.json >/tmp/narrow.txt 2>&1 && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: narrowing RBAC should exit 0, got $rc" >&2
+  cat /tmp/narrow.txt >&2
+  exit 1
+fi
+grep -q "No policy violations." /tmp/narrow.txt
+
+# --no-policy prints what it would have blocked rather than hiding it.
+run diff /fixtures/before.json /fixtures/after.json --no-policy | grep -q "(warn)"
+
+# A --json diff report is not a snapshot, even though it shares the apiVersion.
+run diff /fixtures/before.json /fixtures/after.json --json /out/report.json \
+  >/dev/null 2>&1 || true
+if [ ! -s "$WORK/report.json" ]; then
+  echo "FAIL: --json wrote no report" >&2
+  exit 1
+fi
+run diff /out/report.json /fixtures/after.json >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" -ne 65 ]; then
+  echo "FAIL: a diff report read as a snapshot should exit 65, got $rc" >&2
+  exit 1
+fi
+
+rm -f /tmp/diff.txt /tmp/narrow.txt
 echo PASS

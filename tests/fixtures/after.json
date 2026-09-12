@@ -69,6 +69,7 @@
       ]
     }
   ],
+  "kind": "RbacSnapshot",
   "roleBindings": [
     {
       "name": "deployer",

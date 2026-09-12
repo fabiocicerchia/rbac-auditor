@@ -4,7 +4,10 @@
 # file at all the defaults below apply, and every rule is on and blocking: a
 # policy that ships permissive is a policy nobody ever tightens.
 #
-# Each rule judges *additions only*. Taking a grant away never fails a build.
+# Each rule judges *additions only* — a permission the cluster did not already
+# allow. Taking a grant away never fails a build, and neither does narrowing
+# one: dropping verbs, replacing `*` with named resources, restricting a rule
+# to specific resourceNames, or splitting a rule in two are all silent.
 
 version: 1
 
@@ -42,6 +45,12 @@ rules:
 #   2. `fail: false` on a rule — it still reports, marked (warn), but stops
 #      deciding the exit code.
 #   3. `enabled: false` — the rule stops looking. Nothing will tell you again.
+#
+# To read what the gate would block without acting on it, pass --no-policy: the
+# violations are still printed, marked (warn), and the exit code stays 0.
+#
+# Every list below has to stay a list. `verbs: bind` instead of `verbs: [bind]`
+# is rejected rather than quietly turned into a substring match.
 #
 # An exemption constrains only the fields it names (`rule`, `object`,
 # `subject`), a value ending in `*` matches a prefix, and `reason` is required:

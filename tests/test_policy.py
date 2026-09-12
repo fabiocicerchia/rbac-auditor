@@ -9,6 +9,7 @@ is tested for firing *and* for not firing on the change that looks like it.
 import sys
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
@@ -49,7 +50,11 @@ def rules_fired(violations):
 
 
 class ClusterAdminBindingTest(unittest.TestCase):
-    subject = {"kind": "ServiceAccount", "namespace": "ci", "name": "deployer"}
+    subject: ClassVar[dict] = {
+        "kind": "ServiceAccount",
+        "namespace": "ci",
+        "name": "deployer",
+    }
 
     def test_a_new_cluster_admin_binding_fails(self):
         violations, _ = verdict(
@@ -217,6 +222,154 @@ class AnonymousSubjectTest(unittest.TestCase):
         )
 
 
+class NarrowingTest(unittest.TestCase):
+    """CLAUDE.md: every rule needs a case for it *not* firing on the change
+    that looks like it. For wildcard and escalating-verbs that change is a
+    tightening, which a gate must never block — "only additions are judged"."""
+
+    def narrow(self, before_rule, after_rule):
+        violations, _ = verdict(
+            snapshot(clusterRoles=[role("r", [before_rule])]),
+            snapshot(clusterRoles=[role("r", [after_rule])]),
+        )
+        return violations
+
+    def test_dropping_verbs_from_an_escalating_rule_does_not_fire(self):
+        rule = {
+            "apiGroups": ["rbac.authorization.k8s.io"],
+            "resources": ["roles"],
+            "verbs": ["bind", "get", "list"],
+        }
+        narrowed = dict(rule, verbs=["bind"])
+        self.assertEqual(self.narrow(rule, narrowed), [])
+
+    def test_dropping_resources_from_a_wildcard_rule_does_not_fire(self):
+        rule = {"apiGroups": ["*"], "resources": ["pods", "secrets"], "verbs": ["get"]}
+        narrowed = dict(rule, resources=["pods"])
+        self.assertEqual(self.narrow(rule, narrowed), [])
+
+    def test_adding_resource_names_to_a_wildcard_rule_does_not_fire(self):
+        """Restricting a rule to named objects is strictly a tightening."""
+        rule = {"apiGroups": ["*"], "resources": ["secrets"], "verbs": ["get"]}
+        narrowed = dict(rule, resourceNames=["db"])
+        self.assertEqual(self.narrow(rule, narrowed), [])
+
+    def test_splitting_a_rule_in_two_does_not_fire(self):
+        violations, _ = verdict(
+            snapshot(
+                clusterRoles=[
+                    role(
+                        "r",
+                        [
+                            {
+                                "apiGroups": ["*"],
+                                "resources": ["pods"],
+                                "verbs": ["get", "list"],
+                            }
+                        ],
+                    )
+                ]
+            ),
+            snapshot(
+                clusterRoles=[
+                    role(
+                        "r",
+                        [
+                            {
+                                "apiGroups": ["*"],
+                                "resources": ["pods"],
+                                "verbs": ["get"],
+                            },
+                            {
+                                "apiGroups": ["*"],
+                                "resources": ["pods"],
+                                "verbs": ["list"],
+                            },
+                        ],
+                    )
+                ]
+            ),
+        )
+        self.assertEqual(violations, [])
+
+    def test_widening_the_same_rule_still_fires(self):
+        """The other half: the tightening case must not have silenced the
+        genuine one."""
+        rule = {
+            "apiGroups": ["rbac.authorization.k8s.io"],
+            "resources": ["roles"],
+            "verbs": ["get"],
+        }
+        widened = dict(rule, verbs=["bind", "get"])
+        self.assertEqual(rules_fired(self.narrow(rule, widened)), ["escalating-verbs"])
+
+    def test_narrowing_a_bindings_role_does_not_fire_anonymous_subject(self):
+        """roleRef edit -> view with the same subject is a tightening. The
+        subject was already bound here, so it is not newly bound."""
+        anon = [{"kind": "Group", "name": "system:unauthenticated"}]
+        violations, _ = verdict(
+            snapshot(clusterRoleBindings=[binding("b", "edit", anon)]),
+            snapshot(clusterRoleBindings=[binding("b", "view", anon)]),
+        )
+        self.assertEqual(violations, [])
+
+    def test_repointing_a_binding_at_cluster_admin_still_fires(self):
+        """…but the role the binding grants is a different question: every
+        subject in it now holds cluster-admin."""
+        subjects = [{"kind": "ServiceAccount", "namespace": "ci", "name": "deployer"}]
+        violations, _ = verdict(
+            snapshot(clusterRoleBindings=[binding("b", "view", subjects)]),
+            snapshot(clusterRoleBindings=[binding("b", "cluster-admin", subjects)]),
+        )
+        self.assertEqual(rules_fired(violations), ["cluster-admin-binding"])
+
+
+class CollapseTest(unittest.TestCase):
+    def test_one_rule_yields_one_finding_per_reason_not_per_grant(self):
+        """A rule granting `*` over five resources and three verbs is fifteen
+        new grants. Fifteen identical findings is a report nobody reads."""
+        violations, _ = verdict(
+            snapshot(),
+            snapshot(
+                clusterRoles=[
+                    role(
+                        "r",
+                        [
+                            {
+                                "apiGroups": ["*"],
+                                "resources": ["pods", "secrets", "configmaps"],
+                                "verbs": ["get", "list"],
+                            }
+                        ],
+                    )
+                ]
+            ),
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0]["collapsed"], 5)
+
+    def test_distinct_escalating_verbs_stay_distinct(self):
+        violations, _ = verdict(
+            snapshot(),
+            snapshot(
+                clusterRoles=[
+                    role(
+                        "r",
+                        [
+                            {
+                                "apiGroups": ["rbac.authorization.k8s.io"],
+                                "resources": ["roles"],
+                                "verbs": ["bind", "escalate"],
+                            }
+                        ],
+                    )
+                ]
+            ),
+        )
+        self.assertEqual(rules_fired(violations), ["escalating-verbs"])
+        self.assertEqual(len(violations), 2)
+
+
 class RelaxingTest(unittest.TestCase):
     """The three documented ways to turn a rule down, narrowest first."""
 
@@ -338,6 +491,38 @@ class PolicyFileTest(unittest.TestCase):
     def test_an_exemption_needs_something_to_match_on(self):
         with self.assertRaises(ra.PolicyError):
             ra.merge_policy({"exempt": [{"reason": "just because"}]})
+
+    def test_a_scalar_where_a_list_belongs_is_fatal(self):
+        """`verbs: bind` instead of `verbs: [bind]` would turn a membership
+        test into a substring one — the check silently stops working."""
+        with self.assertRaises(ra.PolicyError) as caught:
+            ra.merge_policy({"rules": {"escalating-verbs": {"verbs": "bind"}}})
+        self.assertIn("list of strings", str(caught.exception))
+
+    def test_a_scalar_roles_list_cannot_become_a_substring_match(self):
+        with self.assertRaises(ra.PolicyError):
+            ra.merge_policy(
+                {"rules": {"cluster-admin-binding": {"roles": "cluster-admin"}}}
+            )
+
+    def test_a_null_list_is_fatal(self):
+        with self.assertRaises(ra.PolicyError):
+            ra.merge_policy({"rules": {"wildcard": {"fields": None}}})
+
+    def test_a_non_bool_enabled_is_fatal(self):
+        with self.assertRaises(ra.PolicyError) as caught:
+            ra.merge_policy({"rules": {"wildcard": {"enabled": "no"}}})
+        self.assertIn("true or false", str(caught.exception))
+
+    def test_a_non_string_exempt_value_is_fatal(self):
+        """_matches globs with str.endswith; a list here was a traceback."""
+        with self.assertRaises(ra.PolicyError) as caught:
+            ra.merge_policy({"exempt": [{"object": ["A", "B"], "reason": "x"}]})
+        self.assertIn("must be a string", str(caught.exception))
+
+    def test_a_non_string_reason_is_fatal(self):
+        with self.assertRaises(ra.PolicyError):
+            ra.merge_policy({"exempt": [{"object": "ClusterRole/x", "reason": True}]})
 
     def test_the_shipped_example_is_valid(self):
         path = Path(__file__).resolve().parent.parent / ".rbac-policy.example.yaml"

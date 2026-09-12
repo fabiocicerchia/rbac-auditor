@@ -2,6 +2,20 @@
   "apiVersion": "rbac-audit/v1",
   "clusterRoleBindings": [
     {
+      "name": "ci-admin",
+      "roleRef": {
+        "kind": "ClusterRole",
+        "name": "cluster-admin"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "deployer",
+          "namespace": "ci"
+        }
+      ]
+    },
+    {
       "name": "view-everyone",
       "roleRef": {
         "kind": "ClusterRole",
@@ -11,6 +25,10 @@
         {
           "kind": "Group",
           "name": "system:authenticated"
+        },
+        {
+          "kind": "Group",
+          "name": "system:unauthenticated"
         }
       ]
     }
@@ -84,6 +102,31 @@
           "verbs": [
             "get",
             "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "rbac.authorization.k8s.io"
+          ],
+          "resources": [
+            "roles"
+          ],
+          "verbs": [
+            "bind"
+          ]
+        },
+        {
+          "apiGroups": [
+            "*"
+          ],
+          "resourceNames": [
+            "db"
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get"
           ]
         }
       ]

@@ -56,10 +56,17 @@ class ExitCodeTest(unittest.TestCase):
         self.assertIn("No changes.", out)
         self.assertIn("No policy violations.", out)
 
-    def test_no_policy_reports_without_gating(self):
+    def test_no_policy_shows_what_would_have_blocked(self):
+        """The docs tell people to run this for a week and read what it would
+        have blocked, so it has to print the violations — not hide them."""
         code, out = run(["diff", BEFORE, AFTER, "--no-policy"])
         self.assertEqual(code, ra.EXIT_OK)
         self.assertIn("ClusterRoleBinding/ci-admin", out)
+        self.assertIn("Policy violations", out)
+        self.assertIn("cluster-admin-binding", out)
+        self.assertIn("(warn)", out)
+        self.assertIn("(none gating)", out)
+        self.assertNotIn("No policy violations.", out)
 
     def test_a_missing_snapshot_exits_66(self):
         code, _ = run(["diff", str(FIXTURES / "nope.json"), AFTER])
@@ -105,9 +112,9 @@ class NoClusterTest(unittest.TestCase):
         with (
             mock.patch("rbac_audit.subprocess.run", side_effect=FileNotFoundError),
             self.assertLogs(ra.log, "ERROR") as logs,
+            self.assertRaises(SystemExit) as caught,
         ):
-            with self.assertRaises(SystemExit) as caught:
-                ra.kubectl_json("clusterroles")
+            ra.kubectl_json("clusterroles")
         self.assertEqual(caught.exception.code, ra.EXIT_UNAVAILABLE)
         self.assertIn("kubectl is not on PATH", logs.output[0])
 
@@ -119,21 +126,137 @@ class NoClusterTest(unittest.TestCase):
         self.assertEqual(code, ra.EXIT_VIOLATIONS)
 
 
+class InputOrderTest(unittest.TestCase):
+    """What the command line alone can reject is rejected before the cluster
+    is read: a typo must not exit 69 because kubectl failed, and must not cost
+    a full cluster read to find out about."""
+
+    def test_a_malformed_subject_is_64_even_in_live_cluster_mode(self):
+        with mock.patch("rbac_audit.capture") as capture_mock:
+            code, _ = run(["diff", BEFORE, "--subject", "Robot/ci/x"])
+        capture_mock.assert_not_called()
+        self.assertEqual(code, ra.EXIT_USAGE)
+
+    def test_an_unreadable_policy_is_65_before_the_cluster_is_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.yaml"
+            path.write_text("rules:\n  nope: {}\n")
+            with mock.patch("rbac_audit.capture") as capture_mock:
+                code, _ = run(["diff", BEFORE, "--policy", str(path)])
+        capture_mock.assert_not_called()
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_a_namespace_on_a_group_is_a_usage_error(self):
+        """`Group/ci/system:unauthenticated` can never match anything, so
+        reporting "no permissions" would read as an answer, not a typo."""
+        with self.assertRaises(SystemExit) as caught:
+            ra.parse_subject("Group/ci/system:unauthenticated")
+        self.assertEqual(caught.exception.code, ra.EXIT_USAGE)
+
+
+class DiffReportIsNotASnapshotTest(unittest.TestCase):
+    def test_a_json_diff_report_is_refused_as_a_snapshot(self):
+        """Both files carry the same apiVersion, so `kind` has to separate
+        them. Read as a snapshot, a diff report looks like an empty cluster —
+        which reports everything as newly added and fails the build."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "diff.json"
+            run(["diff", BEFORE, AFTER, "--json", str(report)])
+            self.assertEqual(json.loads(report.read_text())["kind"], ra.DIFF_KIND)
+            with self.assertLogs(ra.log, "ERROR") as logs:
+                code, _ = run(["diff", str(report), AFTER])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+        self.assertIn("diff report", logs.output[0])
+
+    def test_a_snapshot_declares_its_kind(self):
+        self.assertEqual(ra.load_snapshot(BEFORE)["kind"], ra.SNAPSHOT_KIND)
+
+
+class MalformedSnapshotTest(unittest.TestCase):
+    """Structure, not just the version stamp: this is the input to a gate."""
+
+    def check(self, mutate):
+        snap = json.loads(Path(BEFORE).read_text())
+        mutate(snap)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snap.json"
+            path.write_text(json.dumps(snap))
+            with self.assertLogs(ra.log, "ERROR"):
+                code, _ = run(["diff", str(path), AFTER])
+        return code
+
+    def test_a_section_that_is_not_a_list(self):
+        self.assertEqual(
+            self.check(lambda s: s.update(clusterRoles={"name": "x"})), ra.EXIT_DATAERR
+        )
+
+    def test_an_item_that_is_not_an_object(self):
+        self.assertEqual(
+            self.check(lambda s: s.update(clusterRoles=["view"])), ra.EXIT_DATAERR
+        )
+
+    def test_an_item_with_no_name(self):
+        self.assertEqual(
+            self.check(lambda s: s.update(clusterRoles=[{"rules": []}])),
+            ra.EXIT_DATAERR,
+        )
+
+    def test_rules_that_are_not_a_list(self):
+        self.assertEqual(
+            self.check(
+                lambda s: s.update(clusterRoles=[{"name": "v", "rules": "all"}])
+            ),
+            ra.EXIT_DATAERR,
+        )
+
+    def test_a_rule_field_that_is_not_a_list_of_strings(self):
+        self.assertEqual(
+            self.check(
+                lambda s: s.update(
+                    clusterRoles=[{"name": "v", "rules": [{"verbs": [1, 2]}]}]
+                )
+            ),
+            ra.EXIT_DATAERR,
+        )
+
+    def test_a_role_ref_that_is_not_an_object(self):
+        self.assertEqual(
+            self.check(
+                lambda s: s.update(
+                    clusterRoleBindings=[{"name": "b", "roleRef": "view"}]
+                )
+            ),
+            ra.EXIT_DATAERR,
+        )
+
+    def test_subjects_that_are_not_objects(self):
+        self.assertEqual(
+            self.check(
+                lambda s: s.update(
+                    clusterRoleBindings=[
+                        {
+                            "name": "b",
+                            "roleRef": {"kind": "ClusterRole", "name": "v"},
+                            "subjects": ["alice"],
+                        }
+                    ]
+                )
+            ),
+            ra.EXIT_DATAERR,
+        )
+
+
 class PolicyFlagTest(unittest.TestCase):
     def test_an_exempting_policy_clears_the_gate(self):
-        policy = "\n".join(
-            [
-                "version: 1",
-                "exempt:",
-                '  - object: "ClusterRoleBinding/ci-admin"',
-                "    reason: the CI deployer, reviewed 2026-09",
-                '  - object: "Role/ci/deploy"',
-                "    reason: reviewed with the deploy change",
-                '  - object: "ClusterRoleBinding/view-everyone"',
-                "    reason: public read, deliberate",
-                "",
-            ]
-        )
+        policy = """version: 1
+exempt:
+  - object: "ClusterRoleBinding/ci-admin"
+    reason: the CI deployer, reviewed 2026-09
+  - object: "Role/ci/deploy"
+    reason: reviewed with the deploy change
+  - object: "ClusterRoleBinding/view-everyone"
+    reason: public read, deliberate
+"""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.yaml"
             path.write_text(policy)
@@ -161,9 +284,22 @@ class MachineOutputTest(unittest.TestCase):
             code, out = run(["diff", BEFORE, AFTER, "--json", str(path)])
             data = json.loads(path.read_text())
         self.assertEqual(code, ra.EXIT_VIOLATIONS)
-        # The human report says four; so must the machine one.
-        self.assertIn("4 policy violations", out)
-        self.assertEqual(data["summary"]["violations"], 4)
+        # Whatever the count is, both renderings have to agree on it — they
+        # come from one run, so they cannot be allowed to disagree.
+        count = data["summary"]["violations"]
+        self.assertIn(f"{count} policy violations", out)
+        self.assertEqual(count, len(data["violations"]))
+        # bind and escalate are separate escalation paths, so separate findings.
+        self.assertEqual(
+            sorted(v["rule"] for v in data["violations"]),
+            [
+                "anonymous-subject",
+                "cluster-admin-binding",
+                "escalating-verbs",
+                "escalating-verbs",
+                "wildcard",
+            ],
+        )
         self.assertEqual(data["apiVersion"], ra.SNAPSHOT_VERSION)
         self.assertEqual(data["to"], AFTER)
 
@@ -191,6 +327,34 @@ class MachineOutputTest(unittest.TestCase):
         self.assertEqual(data["subject"], "ServiceAccount/ci/deployer")
         self.assertIn("patch", data["matrix"]["verbs"])
         self.assertTrue(data["matrix"]["rows"])
+
+    def test_the_report_carries_grant_counts_not_every_grant(self):
+        """One rule over many resources and verbs expands to thousands of
+        grants. They are how the policy decides, not something to serialise:
+        a first-run diff of a real cluster would be tens of megabytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diff.json"
+            run(["diff", BEFORE, AFTER, "--json", str(path)])
+            data = json.loads(path.read_text())
+        role = next(c for c in data["changes"] if c["object"] == "Role/ci/deploy")
+        self.assertNotIn("grants", role)
+        # patch on deployments, bind and escalate on roles, get on secrets.*
+        # — and nothing lost: the deployments rule gained a verb, it did not
+        # trade one away.
+        self.assertEqual(role["grantCounts"], {"added": 4, "removed": 0})
+        # `rules` is still there: it is what somebody has to go and edit.
+        self.assertIn("rules", role)
+
+    def test_a_binding_change_has_no_grant_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diff.json"
+            run(["diff", BEFORE, AFTER, "--json", str(path)])
+            data = json.loads(path.read_text())
+        binding = next(
+            c for c in data["changes"] if c["object"] == "ClusterRoleBinding/ci-admin"
+        )
+        self.assertNotIn("grantCounts", binding)
+        self.assertIn("newlyGranted", binding)
 
     def test_machine_output_is_deterministic(self):
         first = run(["diff", BEFORE, AFTER, "--json", "-"])[1]

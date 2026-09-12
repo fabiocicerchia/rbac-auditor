@@ -26,7 +26,12 @@ for those.
 .TP
 .B snapshot
 Dump RBAC as deterministic JSON: sorted, normalised, and with no timestamp in
-the payload, so an unchanged cluster produces byte-identical output.
+the payload, so an unchanged cluster produces byte-identical output. The file
+declares
+.BR kind:\ RbacSnapshot ,
+which is what distinguishes it from the
+.B \-\-json
+diff report.
 .TP
 .BI diff " OLD " [ NEW ]
 Compare two snapshots, or
@@ -34,6 +39,8 @@ Compare two snapshots, or
 against the live cluster when
 .I NEW
 is omitted. Prints a readable diff, applies the policy and exits 2 if it fails.
+Only newly allowed permissions are judged: removing a grant, or narrowing one,
+never fails the build.
 .SH OPTIONS
 .TP
 .BI \-o ", " \-\-output " PATH"
@@ -52,14 +59,18 @@ The policy file. Defaults to
 in the working directory if it exists, and to the built-in rules otherwise.
 .TP
 .B \-\-no\-policy
-Report the changes without gating on them. For reading, not for pipelines.
+Report what the policy would block without acting on it: every rule still
+runs and every violation is still printed, marked
+.BR (warn) ,
+but the exit status stays 0.
 .TP
 .BI \-\-subject " KIND/NAME"
 Scope the diff to one subject and render it as a resource \(mu verb matrix with
 additions and removals marked.
 .I KIND
-is ServiceAccount, User or Group; a ServiceAccount needs its namespace, as
-.IR ServiceAccount/ namespace / name .
+is ServiceAccount, User or Group. A ServiceAccount needs its namespace, as
+.IR ServiceAccount/ namespace / name ;
+a User or Group has none and must not be given one.
 .TP
 .BI \-\-json " PATH"
 Also write the machine-readable diff.

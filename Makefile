@@ -8,7 +8,7 @@ ARGS      ?= snapshot
 # FC-GEN-057: the same eight verbs in every repo, each either wired or a
 # declared no-op that says why. None of them exit 0 quietly.
 
-.PHONY: help setup install build run test lint format analyze push release
+.PHONY: help setup install build run test test-unit lint format analyze push release
 
 .DEFAULT_GOAL := help
 
@@ -32,10 +32,14 @@ run: build ## Snapshot the cluster in your kubeconfig (ARGS=snapshot by default)
 		-v $(HOME)/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
 		$(IMAGE):$(VERSION) $(ARGS)
 
-# Unit tests first: they need no Docker and no cluster, so a logic error
-# fails in seconds rather than after an image build.
-test: build ## Build, then run the unit tests and the smoke tests
+test-unit: ## Unit tests only — no Docker, no cluster, no image build
 	python3 -m unittest discover -s tests
+
+# `build` is invoked from the recipe rather than declared a prerequisite:
+# prerequisites run first, and the point is that a logic error fails in
+# seconds instead of after an image build.
+test: test-unit ## Unit tests, then build and run the image smoke tests
+	$(MAKE) build
 	./test.sh $(IMAGE):$(VERSION)
 
 lint: ## Run the whole gate — every hook, every file

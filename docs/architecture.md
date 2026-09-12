@@ -76,8 +76,15 @@ RBAC has to produce byte-identical bytes. Capture therefore:
 `aggregationRule` is kept: for an aggregated ClusterRole it is the thing a
 human edits, and the rules underneath it are what the controller wrote.
 
-The file carries `"apiVersion": "rbac-audit/v1"`. A reader that does not know a
-version refuses rather than guesses.
+The file carries `"apiVersion": "rbac-audit/v1"` and `"kind": "RbacSnapshot"`.
+A reader that does not know a version refuses rather than guesses.
+
+`kind` is not decoration. The `--json` diff report carries the same
+`apiVersion`, so without it a report is accepted as a snapshot and read as an
+empty cluster — which reports the entire cluster as newly added and fails the
+build for nothing. Loading also validates the structure, field by field, and
+names the field that is wrong: this is the input to a security gate, and a gate
+that reads a malformed file as an empty cluster is worse than one that refuses.
 
 ## What the diff compares
 
@@ -91,8 +98,58 @@ of the three it is looking at.
 
 One case is worth stating: `roleRef` is immutable, so a binding whose `roleRef`
 differs between snapshots was deleted and recreated under the same name. Every
-subject now points at a different role, which is a new grant for all of them,
-and the diff reports it that way.
+subject now holds a different role. The diff records that in `newlyGranted`
+rather than in `subjects.added` — a subject the binding already named was not
+newly bound to it, and saying otherwise printed the same subject as both an
+addition and a removal.
+
+## Rules are containers; grants are permissions
+
+The policy judges **grants**, not rules, and that distinction is load-bearing.
+
+A grant is one verb on one resource in one apiGroup, optionally narrowed to one
+`resourceName` — or one verb on one non-resource URL. `rule_grants()` expands a
+PolicyRule into them.
+
+Rules are mutable containers, so comparing them as wholes gets tightenings
+backwards. Narrowing `verbs: [bind, get, list]` to `verbs: [bind]` replaces one
+rule with another: a rule-level diff sees a rule removed and a rule added, and
+reports the surviving `bind` as a **new** grant of `bind` — failing the build
+for *removing* two verbs. A grant-level diff says two grants were lost and none
+gained, which is what happened.
+
+Being literal about grants is not enough on its own, because a narrower grant
+is a different tuple. Each side of the delta is therefore filtered against what
+the other already **implied**: `_grant_subsumers()` asks whether a broader grant
+was already there — `*` in place of the apiGroup, resource or verb, or the same
+grant without the `resourceName` that now narrows it. So all of these are
+correctly silent:
+
+| Change                                          | Why it is not a new grant                      |
+| ----------------------------------------------- | ---------------------------------------------- |
+| `resources: [*]` → `resources: [pods]`          | pods was already covered by `*`                |
+| `verbs: [*]` → `verbs: [get, list]`             | both were already covered by `*`               |
+| adding `resourceNames: [db]` to a rule          | every name was already covered, `db` included  |
+| splitting one rule into two that grant the same | the same grants, in different containers       |
+| `/api/*` → `/api/v1`                            | non-resource URLs are the one place RBAC globs |
+
+Subsumption runs one way only. Replacing `resources: [pods]` with
+`resources: [*]` is a new grant and is reported.
+
+The human diff still prints **rules**, because a rule is what somebody has to
+edit. So does the machine report, alongside a `grantCounts` summary: the
+expanded grants stay internal, because they are quadratic in the size of a rule
+— one rule over 40 resources and 12 verbs is 1440 grants, and serialising them
+would make a first-run diff of a real cluster tens of megabytes of JSON.
+
+## One finding per reason, not per grant
+
+A rule granting `*` on five resources with three verbs is fifteen new grants.
+Fifteen identical findings is a report nobody reads, so violations that say the
+same thing about the same object collapse into the first with a count —
+`(+14 more like it)`. The key is per rule: which fields carry the `*` for
+`wildcard`, which verb for `escalating-verbs`. Two different escalation verbs
+stay two findings, because they are two different things to go and fix.
 
 ## The policy
 
@@ -112,12 +169,30 @@ Two decisions behind them:
 cluster-admin is a gate people route around.
 
 **`escalating-verbs` ignores `*`.** A wildcard verb grants `bind`, `escalate`
-and `impersonate` too, but the `wildcard` rule already reports that rule.
+and `impersonate` too, but the `wildcard` rule already reports that grant.
 Saying it twice trains people to skim the list.
+
+`cluster-admin-binding` reads `newlyGranted` and `anonymous-subject` reads
+`subjects.added`, which is not an inconsistency. The first watches *the role*:
+re-pointing a binding at cluster-admin gives it to every subject already in
+the binding. The second watches *the subject*: one already named by the binding
+is not newly bound to it, so narrowing that binding's role is not a new
+anonymous grant.
 
 A malformed policy file is fatal, and an unknown rule name is an error rather
 than a warning: a typo would otherwise leave that rule at its default — a check
 the author believes they turned off and did not.
+
+Setting *values* are type-checked for the same reason. `verbs: bind` instead of
+`verbs: [bind]` is a plausible mistake in YAML, and left unchecked it turns a
+membership test into a substring one: the rule quietly stops matching what it
+should, or starts matching what it should not (`roles: cluster-admin` would
+flag a binding to a ClusterRole named `admin`).
+
+`--no-policy` downgrades every rule to `fail: false` rather than disabling it.
+The flag exists so somebody can read what the gate *would* have blocked before
+switching it on, which only works if the violations are still printed — marked
+`(warn)`, with `(none gating)` on the summary line.
 
 ## The subject matrix
 

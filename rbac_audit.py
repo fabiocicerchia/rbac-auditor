@@ -35,6 +35,13 @@ log = logging.getLogger("rbac-audit")
 # guesses. Bump it only for a change a v1 reader cannot make sense of.
 SNAPSHOT_VERSION = "rbac-audit/v1"
 
+# Both files this tool writes carry the same apiVersion, so `kind` is what
+# tells them apart. Without it a `--json` diff report is accepted as a
+# snapshot and read as an empty cluster, which reports the whole cluster as
+# newly added and fails the build for nothing.
+SNAPSHOT_KIND = "RbacSnapshot"
+DIFF_KIND = "RbacDiff"
+
 # Policy file looked for in the working directory when --policy is not given.
 POLICY_FILE = ".rbac-policy.yaml"
 
@@ -208,7 +215,7 @@ def object_id(obj):
 
 def capture(context=None):
     """Snapshot the live cluster. The only function that talks to it."""
-    snap = {"apiVersion": SNAPSHOT_VERSION}
+    snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
     for key, _kind, resource, normalize in SECTIONS:
         items = [normalize(obj) for obj in kubectl_json(resource, context)]
         snap[key] = sorted(items, key=object_id)
@@ -224,6 +231,93 @@ def dump_snapshot(snap):
     already knows.
     """
     return json.dumps(snap, indent=2, sort_keys=True) + "\n"
+
+
+class SnapshotError(Exception):
+    """A file that is not a usable snapshot. Fatal, and reported with the field
+    that is wrong: this is the input to a security gate, and a gate that reads
+    a malformed file as an empty cluster fails builds for nothing."""
+
+
+def _require(condition, message):
+    if not condition:
+        raise SnapshotError(message)
+
+
+def _require_str_list(value, where):
+    _require(isinstance(value, list), f"{where}: expected a list")
+    for position, item in enumerate(value):
+        _require(isinstance(item, str), f"{where}[{position}]: expected a string")
+
+
+def _validate_rules(rules, where):
+    _require(isinstance(rules, list), f"{where}.rules: expected a list")
+    for position, rule in enumerate(rules):
+        at = f"{where}.rules[{position}]"
+        _require(isinstance(rule, dict), f"{at}: expected an object")
+        for field in RULE_FIELDS:
+            if field in rule:
+                _require_str_list(rule[field], f"{at}.{field}")
+
+
+def _validate_subjects(subjects, where):
+    _require(isinstance(subjects, list), f"{where}.subjects: expected a list")
+    for position, subject in enumerate(subjects):
+        at = f"{where}.subjects[{position}]"
+        _require(isinstance(subject, dict), f"{at}: expected an object")
+        for field in ("kind", "name", "namespace"):
+            if field in subject:
+                _require(
+                    isinstance(subject[field], str), f"{at}.{field}: expected a string"
+                )
+
+
+def validate_snapshot(data):
+    """Raise SnapshotError unless `data` is a snapshot this version can read."""
+    _require(isinstance(data, dict), "expected a JSON object at the top level")
+    kind = data.get("kind")
+    _require(
+        kind == SNAPSHOT_KIND,
+        f"kind is {kind!r}, expected {SNAPSHOT_KIND!r}"
+        + (
+            " — this looks like a `--json` diff report, not a snapshot"
+            if kind == DIFF_KIND
+            else ""
+        ),
+    )
+    _require(
+        data.get("apiVersion") == SNAPSHOT_VERSION,
+        f"apiVersion is {data.get('apiVersion')!r}, expected {SNAPSHOT_VERSION!r}",
+    )
+    for key in SECTION_KEYS:
+        if key not in data:
+            continue
+        items = data[key]
+        _require(isinstance(items, list), f"{key}: expected a list")
+        for position, obj in enumerate(items):
+            where = f"{key}[{position}]"
+            _require(isinstance(obj, dict), f"{where}: expected an object")
+            _require(
+                isinstance(obj.get("name"), str) and obj["name"],
+                f"{where}: needs a non-empty string name",
+            )
+            if "namespace" in obj:
+                _require(
+                    isinstance(obj["namespace"], str),
+                    f"{where}.namespace: expected a string",
+                )
+            if "rules" in obj:
+                _validate_rules(obj["rules"], where)
+            if "roleRef" in obj:
+                ref = obj["roleRef"]
+                _require(isinstance(ref, dict), f"{where}.roleRef: expected an object")
+                for field in ("kind", "name"):
+                    _require(
+                        isinstance(ref.get(field), str),
+                        f"{where}.roleRef.{field}: expected a string",
+                    )
+            if "subjects" in obj:
+                _validate_subjects(obj["subjects"], where)
 
 
 def load_snapshot(path):
@@ -245,13 +339,10 @@ def load_snapshot(path):
     except json.JSONDecodeError as err:
         log.error("%s is not a JSON snapshot: %s", path, err)
         sys.exit(EXIT_DATAERR)
-    if not isinstance(data, dict) or data.get("apiVersion") != SNAPSHOT_VERSION:
-        log.error(
-            "%s is not a %s snapshot (apiVersion is %r)",
-            path,
-            SNAPSHOT_VERSION,
-            data.get("apiVersion") if isinstance(data, dict) else None,
-        )
+    try:
+        validate_snapshot(data)
+    except SnapshotError as err:
+        log.error("%s: %s", path, err)
         sys.exit(EXIT_DATAERR)
     for key in SECTION_KEYS:
         data.setdefault(key, [])
@@ -275,12 +366,133 @@ def _list_delta(before, after):
     }
 
 
+def rule_grants(rule):
+    """The atomic permissions one PolicyRule expands to.
+
+    A grant is one verb on one resource in one apiGroup (optionally narrowed to
+    one resourceName), or one verb on one non-resource URL. Wildcards are kept
+    as the literal `*` rather than expanded — see `effective_cells`.
+
+    The policy judges these, not rules, and that distinction is the whole
+    reason this function exists. Rules are mutable containers: narrowing
+    `verbs: [bind, get, list]` to `verbs: [bind]` replaces one rule with
+    another, so comparing rules as wholes reports the surviving `bind` as new
+    and fails the build for *removing* two verbs. Comparing grants says what
+    actually happened: two lost, none gained.
+    """
+    grants = []
+    for verb in rule.get("verbs") or []:
+        for url in rule.get("nonResourceURLs") or []:
+            grants.append({"nonResourceURL": url, "verb": verb})
+        for group in rule.get("apiGroups") or []:
+            for resource in rule.get("resources") or []:
+                for name in rule.get("resourceNames") or [""]:
+                    grant = {
+                        "apiGroup": group,
+                        "resource": resource,
+                        "verb": verb,
+                    }
+                    if name:
+                        grant["resourceName"] = name
+                    grants.append(grant)
+    return grants
+
+
+def rules_grants(rules):
+    """Every grant a list of rules expands to, deduplicated and ordered."""
+    unique = {}
+    for rule in rules or []:
+        for grant in rule_grants(rule):
+            unique[canonical(grant)] = grant
+    return [unique[key] for key in sorted(unique)]
+
+
+def _grant_subsumers(grant):
+    """Keys of every grant that would already have implied this one.
+
+    A grant is implied by a broader one: `*` in place of its apiGroup,
+    resource or verb, or the same grant without the resourceName that narrows
+    it. Sixteen candidates at most, so this is a set lookup rather than a scan.
+
+    This is what makes a *tightening* invisible to the policy. Adding
+    `resourceNames: [db]` to a rule, or replacing `resources: [*]` with
+    `resources: [pods]`, produces grant tuples that did not literally exist
+    before — but the cluster already allowed every one of them, so none of
+    them is new.
+    """
+    # resourceNames are literal in RBAC, never globs, so that dimension is not
+    # wildcarded — only dropped, since a rule without one covers every name.
+    names = (grant["resourceName"], None) if "resourceName" in grant else (None,)
+    for group in (grant["apiGroup"], "*"):
+        for resource in (grant["resource"], "*"):
+            for verb in (grant["verb"], "*"):
+                for name in names:
+                    candidate = {
+                        "apiGroup": group,
+                        "resource": resource,
+                        "verb": verb,
+                    }
+                    if name is not None:
+                        candidate["resourceName"] = name
+                    yield canonical(candidate)
+
+
+def _url_grant_implied(grant, before):
+    """Whether a non-resource URL grant was already allowed.
+
+    Non-resource URLs are the one place RBAC does do prefix globs, so `/api/*`
+    implies `/api/v1` and this has to be a scan.
+    """
+    for url, verb in before:
+        if verb not in ("*", grant["verb"]):
+            continue
+        if url == grant["nonResourceURL"] or (
+            url.endswith("*") and grant["nonResourceURL"].startswith(url[:-1])
+        ):
+            return True
+    return False
+
+
+def new_grants(before, after):
+    """The grants in `after` that `before` did not already imply."""
+    keys = {canonical(grant) for grant in before}
+    urls = [
+        (grant["nonResourceURL"], grant["verb"])
+        for grant in before
+        if "nonResourceURL" in grant
+    ]
+    out = []
+    for grant in after:
+        if canonical(grant) in keys:
+            continue
+        if "nonResourceURL" in grant:
+            if not _url_grant_implied(grant, urls):
+                out.append(grant)
+        elif not any(key in keys for key in _grant_subsumers(grant)):
+            out.append(grant)
+    return out
+
+
+def grant_delta(before, after):
+    """Which permissions were genuinely gained, and which genuinely lost.
+
+    Not a plain set difference: each side is filtered against what the other
+    already implied, so rewriting a rule without changing what it allows is
+    empty on both sides.
+    """
+    before, after = rules_grants(before), rules_grants(after)
+    return {
+        "added": new_grants(before, after),
+        "removed": new_grants(after, before),
+    }
+
+
 def _change(kind, verb, oid, before, after):
     """One changed object, in the shape the policy and both renderers read.
 
     Additions and removals are expressed the same way a modification is — an
-    added role is every one of its rules added — so a policy check never has to
-    ask which of the three it is looking at.
+    added role is every one of its grants added — so a policy check never has
+    to ask which of the three it is looking at.
     """
     obj = after or before
     change = {
@@ -292,26 +504,43 @@ def _change(kind, verb, oid, before, after):
         "namespace": obj.get("namespace", ""),
     }
     if "rules" in obj:
+        # `rules` is for a human: it shows the rule text somebody has to edit.
+        # `grants` is for the policy: it is what the subject can actually do.
         change["rules"] = _list_delta(
             (before or {}).get("rules"), (after or {}).get("rules")
         )
+        change["grants"] = grant_delta(
+            (before or {}).get("rules"), (after or {}).get("rules")
+        )
+        old_aggregation = (before or {}).get("aggregationRule")
+        new_aggregation = (after or {}).get("aggregationRule")
+        if old_aggregation != new_aggregation:
+            # Without this an aggregation-selector change renders as a bare
+            # `~ ClusterRole/x` with nothing under it: a changed object the
+            # diff cannot say anything about is worse than no line at all.
+            change["aggregationRule"] = {
+                "before": old_aggregation,
+                "after": new_aggregation,
+            }
     if "roleRef" in obj:
         old_ref = (before or {}).get("roleRef")
         new_ref = (after or {}).get("roleRef")
         change["roleRef"] = new_ref or old_ref
-        old_subjects = (before or {}).get("subjects")
-        new_subjects = (after or {}).get("subjects")
+        change["subjects"] = _list_delta(
+            (before or {}).get("subjects"), (after or {}).get("subjects")
+        )
         if before and after and old_ref != new_ref:
-            # roleRef is immutable, so this is a delete-and-recreate under the
-            # same name. Every subject now points at a different role: that is
-            # a new grant for all of them, not an unchanged one.
             change["roleRefBefore"] = old_ref
-            change["subjects"] = {
-                "added": list(new_subjects or []),
-                "removed": list(old_subjects or []),
-            }
+        # Which subjects newly hold the role this binding points at. Normally
+        # the ones added to it — but roleRef is immutable, so a changed one is
+        # a delete and recreate under the same name, and every subject now
+        # points at a different role. Rules that judge *the role* read this;
+        # rules that judge *the subject* read subjects.added, because a subject
+        # already bound here is not newly bound.
+        if change.get("roleRefBefore"):
+            change["newlyGranted"] = list((after or {}).get("subjects") or [])
         else:
-            change["subjects"] = _list_delta(old_subjects, new_subjects)
+            change["newlyGranted"] = list(change["subjects"]["added"])
     return change
 
 
@@ -371,6 +600,10 @@ DEFAULT_POLICY = {
 EXEMPT_MATCH_FIELDS = ("rule", "object", "subject")
 
 
+def _is_str_list(value):
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
 def merge_policy(user):
     """The defaults with the user's file laid over them, or PolicyError.
 
@@ -404,6 +637,21 @@ def merge_policy(user):
             raise PolicyError(
                 f"rule {name!r}: unknown setting(s) {', '.join(sorted(unknown))}"
             )
+        # Types too, not just names. `verbs: bind` instead of `verbs: [bind]`
+        # is a plausible typo, and left unchecked it turns a membership test
+        # into a substring one: the rule silently stops matching what it
+        # should, or starts matching what it should not.
+        for key, value in settings.items():
+            expected = policy["rules"][name][key]
+            if isinstance(expected, bool):
+                if not isinstance(value, bool):
+                    raise PolicyError(
+                        f"rule {name!r}: {key} must be true or false, got {value!r}"
+                    )
+            elif not _is_str_list(value):
+                raise PolicyError(
+                    f"rule {name!r}: {key} must be a list of strings, got {value!r}"
+                )
         policy["rules"][name].update(settings)
 
     exemptions = user.get("exempt") or []
@@ -422,7 +670,14 @@ def merge_policy(user):
                 f"exempt[{position}]: needs at least one of "
                 f"{', '.join(EXEMPT_MATCH_FIELDS)}"
             )
-        if not str(entry.get("reason") or "").strip():
+        for field in EXEMPT_MATCH_FIELDS:
+            # _matches globs with str.endswith, so a non-string here would be
+            # a traceback rather than the parse error it is.
+            if field in entry and not isinstance(entry[field], str):
+                raise PolicyError(
+                    f"exempt[{position}]: {field} must be a string, got {entry[field]!r}"
+                )
+        if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
             # Same rule the ignore file had: an accepted risk with no stated
             # reason is indistinguishable from a mistake six months later.
             raise PolicyError(f"exempt[{position}]: needs a reason")
@@ -472,7 +727,25 @@ def rule_str(rule):
     return " ".join(parts)
 
 
-def _violation(rule_name, change, detail, subject=None):
+def grant_str(grant):
+    """One grant on one line: `get secrets.*`, `bind roles.rbac…`, `* *.*`."""
+    if "nonResourceURL" in grant:
+        return f"{grant['verb']} {grant['nonResourceURL']}"
+    group = grant.get("apiGroup", "")
+    resource = grant.get("resource", "")
+    what = f"{resource}.{group}" if group else resource
+    name = grant.get("resourceName")
+    return f"{grant['verb']} {what}" + (f"[{name}]" if name else "")
+
+
+def _violation(rule_name, change, detail, subject=None, dedupe=None):
+    """One violation.
+
+    `dedupe` groups violations that say the same thing about the same object:
+    one rule granting `*` on five resources with three verbs is fifteen new
+    grants, and fifteen identical findings is a report nobody reads. Violations
+    sharing a key collapse into the first, with a count.
+    """
     out = {
         "rule": rule_name,
         "object": change["object"],
@@ -482,7 +755,27 @@ def _violation(rule_name, change, detail, subject=None):
     }
     if subject:
         out["subject"] = subject
+    out["_dedupe"] = dedupe if dedupe is not None else detail
     return out
+
+
+def collapse_violations(violations):
+    """Fold violations sharing a dedupe key into the first, counting the rest."""
+    out, first = [], {}
+    for violation in violations:
+        key = (violation["rule"], violation["object"], violation.pop("_dedupe"))
+        if key in first:
+            first[key]["collapsed"] = first[key].get("collapsed", 0) + 1
+            continue
+        first[key] = violation
+        out.append(violation)
+    return out
+
+
+# Which grant field a policy `fields` entry names. The policy speaks the
+# language of the YAML somebody writes (`verbs`, `resources`, `apiGroups`);
+# a grant is one permission, so its keys are singular.
+WILDCARD_FIELDS = {"verbs": "verb", "resources": "resource", "apiGroups": "apiGroup"}
 
 
 def check_cluster_admin_binding(change, settings):
@@ -490,7 +783,9 @@ def check_cluster_admin_binding(change, settings):
     ref = change.get("roleRef")
     if not ref or ref.get("name") not in settings["roles"]:
         return
-    for subject in change["subjects"]["added"]:
+    # newlyGranted, not subjects.added: re-pointing a binding at cluster-admin
+    # gives it to every subject already in the binding.
+    for subject in change.get("newlyGranted", []):
         yield _violation(
             "cluster-admin-binding",
             change,
@@ -500,37 +795,46 @@ def check_cluster_admin_binding(change, settings):
 
 
 def check_wildcard(change, settings):
-    """A new rule carrying `*` in a field the policy watches."""
-    for rule in change.get("rules", {}).get("added", []):
-        hit = [field for field in settings["fields"] if "*" in (rule.get(field) or [])]
+    """A newly granted permission carrying `*` in a field the policy watches."""
+    for grant in change.get("grants", {}).get("added", []):
+        hit = [
+            field
+            for field in settings["fields"]
+            if grant.get(WILDCARD_FIELDS.get(field, field)) == "*"
+        ]
         if hit:
             yield _violation(
                 "wildcard",
                 change,
-                f"new rule has `*` in {', '.join(hit)}: {rule_str(rule)}",
+                f"new grant has `*` in {', '.join(hit)}: {grant_str(grant)}",
+                dedupe=("wildcard", *hit),
             )
 
 
 def check_escalating_verbs(change, settings):
     """A new grant of bind / escalate / impersonate.
 
-    Only literal verbs: a rule with `*` verbs grants these too, and the
-    wildcard rule already says so. Reporting it twice would train people to
-    skim the list.
+    Only literal verbs: a `*` verb grants these too, and the wildcard rule
+    already says so. Reporting it twice would train people to skim the list.
     """
     watched = set(settings["verbs"])
-    for rule in change.get("rules", {}).get("added", []):
-        granted = sorted(set(rule.get("verbs") or []) & watched)
-        if granted:
+    for grant in change.get("grants", {}).get("added", []):
+        if grant.get("verb") in watched:
             yield _violation(
                 "escalating-verbs",
                 change,
-                f"new rule grants {', '.join(granted)}: {rule_str(rule)}",
+                f"new grant of {grant['verb']}: {grant_str(grant)}",
+                dedupe=grant["verb"],
             )
 
 
 def check_anonymous_subject(change, settings):
-    """A new binding to system:anonymous or system:unauthenticated."""
+    """A new binding to system:anonymous or system:unauthenticated.
+
+    subjects.added, not newlyGranted: this rule watches the subject, and a
+    subject already named by this binding is not newly bound to it. Narrowing
+    the binding's role is not a new anonymous grant.
+    """
     watched = set(settings["subjects"])
     for subject in change.get("subjects", {}).get("added", []):
         if subject.get("name") in watched:
@@ -590,7 +894,7 @@ def evaluate(changes, policy):
             settings = policy["rules"][name]
             if not settings.get("enabled", True):
                 continue
-            for violation in CHECKS[name](change, settings):
+            for violation in collapse_violations(CHECKS[name](change, settings)):
                 violation["fail"] = bool(settings.get("fail", True))
                 entry = exempted_by(violation, policy)
                 if entry:
@@ -635,6 +939,14 @@ def parse_subject(spec):
     if canonical_kind == "ServiceAccount" and not namespace:
         log.error(
             "a ServiceAccount needs its namespace: ServiceAccount/<namespace>/%s", name
+        )
+        sys.exit(EXIT_USAGE)
+    if canonical_kind != "ServiceAccount" and namespace:
+        # Only a ServiceAccount subject has a namespace. Accepting one here
+        # would build a subject nothing can match and report "no permissions",
+        # which reads as an answer rather than as the typo it is.
+        log.error(
+            "a %s subject has no namespace: %s/%s", canonical_kind, canonical_kind, name
         )
         sys.exit(EXIT_USAGE)
     return (canonical_kind, namespace, name)
@@ -822,6 +1134,8 @@ CHANGE_MARK = {"added": "+", "removed": "-", "changed": "~"}
 
 
 def render_changes(changes):
+    """The object diff. Every changed object gets at least one detail line —
+    a bare `~ ClusterRole/x` the diff cannot explain is worse than no line."""
     out = []
     for change in changes:
         out.append(f"{CHANGE_MARK[change['change']]} {change['object']}")
@@ -830,6 +1144,14 @@ def render_changes(changes):
             before = change.get("roleRefBefore")
             moved = f" (was {before['kind']}/{before['name']})" if before else ""
             out.append(f"    roleRef {ref['kind']}/{ref['name']}{moved}")
+        aggregation = change.get("aggregationRule")
+        if aggregation:
+            for label, value in (
+                ("-", aggregation["before"]),
+                ("+", aggregation["after"]),
+            ):
+                if value is not None:
+                    out.append(f"    {label} aggregationRule {canonical(value)}")
         for rule in change.get("rules", {}).get("added", []):
             out.append(f"    + rule {rule_str(rule)}")
         for rule in change.get("rules", {}).get("removed", []):
@@ -853,7 +1175,9 @@ def render_violations(violations, exempted):
         for violation in violations:
             mark = "" if violation["fail"] else " (warn)"
             out.append(f"  [{violation['rule']}]{mark} {violation['object']}")
-            out.append(f"      {violation['detail']}")
+            more = violation.get("collapsed")
+            extra = f" (+{more} more like it)" if more else ""
+            out.append(f"      {violation['detail']}{extra}")
     else:
         out.append("No policy violations.")
     if exempted:
@@ -886,22 +1210,46 @@ def render_report(changes, violations, exempted, header, matrix=None):
     out += render_violations(violations, exempted)
     counts = summarize(changes, violations, exempted)
     out.append("")
+    # Say when violations were found but none of them gate, so a green build
+    # with a page of violations above it is not read as a green build.
+    gate = "" if not violations or gating(violations) else " (none gating)"
     out.append(
         f"{counts['added']} added, {counts['removed']} removed, "
         f"{counts['changed']} changed; {counts['violations']} policy violations"
+        + gate
         + (f", {counts['exempted']} exempted" if counts["exempted"] else "")
         + "."
     )
     return "\n".join(out)
 
 
+def public_change(change):
+    """One change as the machine report carries it.
+
+    The expanded `grants` stay internal. They are how the policy decides, and
+    they are quadratic in the size of a rule — one rule over 40 resources and
+    12 verbs is 1440 of them, which would make a first-run diff of a real
+    cluster tens of megabytes of JSON. `rules` says what changed and
+    `grantCounts` says how much it came to; anyone who needs the expansion can
+    get it from the rules.
+    """
+    out = {key: value for key, value in change.items() if key != "grants"}
+    if "grants" in change:
+        out["grantCounts"] = {
+            "added": len(change["grants"]["added"]),
+            "removed": len(change["grants"]["removed"]),
+        }
+    return out
+
+
 def machine_report(changes, violations, exempted, source, target, subject, matrix):
     out = {
         "apiVersion": SNAPSHOT_VERSION,
+        "kind": DIFF_KIND,
         "from": source,
         "to": target,
         "summary": summarize(changes, violations, exempted),
-        "changes": changes,
+        "changes": [public_change(change) for change in changes],
         "violations": violations,
         "exempted": exempted,
     }
@@ -937,6 +1285,20 @@ def run_snapshot(args):
 
 
 def run_diff(args):
+    # Everything that can be rejected from the command line alone is rejected
+    # first: a malformed --subject or an unreadable policy must not exit 69
+    # because reading the cluster failed, and must not cost a cluster read to
+    # find out about.
+    subject = parse_subject(args.subject) if args.subject else None
+    policy = load_policy(args.policy)
+    if args.no_policy:
+        # Downgrade, do not disable. The point of this flag is to read what the
+        # policy *would* have blocked before switching the gate on, so the
+        # violations still have to be printed — just marked (warn), and not
+        # deciding the exit code.
+        for settings in policy["rules"].values():
+            settings["fail"] = False
+
     old = load_snapshot(args.old)
     if args.new:
         new, target = load_snapshot(args.new), args.new
@@ -945,18 +1307,12 @@ def run_diff(args):
 
     changes = diff_snapshots(old, new)
     matrix = None
-    subject = None
-    if args.subject:
-        subject = parse_subject(args.subject)
+    if subject:
         changes = scope_changes(changes, subject_scope(old, new, subject))
         matrix = matrix_rows(
             effective_cells(old, subject), effective_cells(new, subject)
         )
 
-    if args.no_policy:
-        policy = merge_policy({"rules": {name: {"enabled": False} for name in CHECKS}})
-    else:
-        policy = load_policy(args.policy)
     violations, exempted = evaluate(changes, policy)
 
     header = [f"RBAC diff — {args.old} → {target}"]
@@ -1026,7 +1382,9 @@ def build_parser():
         help=f"policy file (default: ./{POLICY_FILE} if it exists)",
     )
     diff.add_argument(
-        "--no-policy", action="store_true", help="report changes without gating on them"
+        "--no-policy",
+        action="store_true",
+        help="report what the policy would block, without gating on it",
     )
     diff.add_argument(
         "--subject",

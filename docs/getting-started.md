@@ -30,6 +30,10 @@ The file is deterministic: sorted, normalised, and with no timestamp inside it.
 Re-running against an unchanged cluster produces byte-identical output, so
 `git diff` on it is signal and nothing else. **Commit it.**
 
+It declares `"kind": "RbacSnapshot"`, which is how `diff` tells a snapshot from
+the `--json` diff report it also writes. Feeding the wrong one in is an error
+rather than a diff against an empty cluster.
+
 ```sh
 git add rbac/prod.json
 git commit -m "chore(rbac): weekly snapshot"
@@ -107,6 +111,7 @@ NAMESPACE  RESOURCE                          *  bind escalate get list patch
 *          *.*                               +   .      .      .   .     .
 ci         deployments.apps                  .   .      .      =   =     +
 ci         roles.rbac.authorization.k8s.io   .   +      +      .   .     .
+ci         secrets.*                         .   .      .      +   .     .
 
   + gained   - lost   = unchanged   . not granted
 ```
@@ -141,7 +146,11 @@ With no policy file, these four rules are on and all of them fail the build:
 | `escalating-verbs`      | a new grant of `bind`, `escalate` or `impersonate`              |
 | `anonymous-subject`     | a new binding to `system:anonymous` or `system:unauthenticated` |
 
-Only additions are judged. Removing a grant never fails a build.
+Only additions are judged, and "addition" means a permission the cluster did
+not already allow. Removing a grant never fails a build, and neither does
+narrowing one: dropping verbs from a rule, replacing `*` with named resources,
+restricting a rule to specific `resourceNames`, or splitting one rule into two
+that grant the same thing are all silent.
 
 `diff` reads `./.rbac-policy.yaml` if it is there, or `--policy PATH`. Copy
 [`.rbac-policy.example.yaml`](https://github.com/fabiocicerchia/rbac-auditor/blob/main/.rbac-policy.example.yaml)
@@ -203,14 +212,19 @@ rules:
 
 Every rule's list is configurable the same way: `roles` for
 `cluster-admin-binding`, `verbs` for `escalating-verbs`, `subjects` for
-`anonymous-subject`.
+`anonymous-subject`. They are lists, and the file is rejected if you write a
+bare string — `verbs: bind` instead of `verbs: [bind]` would turn a membership
+test into a substring one, and a security check that quietly stops matching is
+the thing this tool exists to prevent.
 
 A malformed policy is a fatal error rather than a warning, and an unknown rule
 name is an error rather than being ignored: a typo would otherwise leave that
 rule at its default — a check you believe you turned off and did not.
 
-To see the changes without any gate at all, pass `--no-policy`. It is for
-reading, not for pipelines.
+To see what the policy *would* block without acting on it, pass `--no-policy`.
+Every rule still runs and every violation is still printed — marked `(warn)`,
+with `(none gating)` on the summary line — but the exit code stays 0. That is
+the flag to start with: read a week of them, then take it off.
 
 ## Gate it in CI
 
