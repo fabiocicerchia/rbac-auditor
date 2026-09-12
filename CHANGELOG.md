@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.3.1...v2.0.0) (2026-09-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* `report`, `dump` and `who-can` are gone, along with `--html`, `--s3`, `--fail-on-findings` and `.rbac-audit-ignore`. `dump` is replaced by `snapshot`, whose format is new and versioned; snapshots written by 1.x are not readable. Gating is now `diff` plus a policy file rather than `report --fail-on-findings`. For who-can queries and access matrices, use rakkess, rbac-tool or rbac-lookup.
+
+### Features
+
+* narrow to snapshotting and a policy-gated diff ([#69](https://github.com/fabiocicerchia/rbac-auditor/issues/69)) ([5be5046](https://github.com/fabiocicerchia/rbac-auditor/commit/5be5046e379b6e91ef566706f25ef7abf9ee8d4f))
+
 ## [1.3.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.3.0...v1.3.1) (2026-09-10)
 
 
