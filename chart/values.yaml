@@ -10,7 +10,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 command: []
-args: ["report"]
+args: ["snapshot"]
 
 env: {}
 envFrom: []
@@ -72,6 +72,8 @@ rbac:
       resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
       verbs: ["get", "list"]
     - apiGroups: [""]
+      # pods: the unused-ServiceAccount rule needs them; they never enter
+      # the snapshot.
       resources: ["serviceaccounts", "namespaces", "pods"]
       verbs: ["get", "list"]
 

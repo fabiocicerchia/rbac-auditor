@@ -2,76 +2,279 @@
 
 ## Prerequisites
 
-A cluster and read access to RBAC. Nothing to install — kubectl is in the
-image, and it uses whatever credentials you give it.
+A cluster and read access to RBAC — or, for the files-only workflow, nothing at
+all. kubectl is in the image and uses whatever credentials you give it.
 
-## First report, from your laptop
+## Day one: what is already wrong
+
+Before there is anything to diff against, audit the cluster as it stands:
+
+```sh
+rbac-audit baseline
+```
+
+`baseline` judges the whole cluster with the same policy `diff` uses, by
+comparing it against an empty one — every object counts as an addition, so
+every standing problem is reported. It takes the same flags as `diff`, and
+accepts a snapshot file instead of a cluster: `rbac-audit baseline rbac/prod.json`.
+
+Expect the first run to be long. It is the entire cluster, not a week of
+change. That is the point: you work through it once, commit the snapshot, and
+from then on `diff` is quiet unless something moves.
+
+Start with `--no-policy` if you would rather read it than be blocked by it.
+
+## Take a snapshot and commit it
+
+```sh
+rbac-audit snapshot -o rbac/prod.json
+```
+
+Or in a container, with your kubeconfig:
 
 ```sh
 docker run --rm --user "$(id -u):$(id -g)" \
   -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
-  fabiocicerchia/rbac-auditor report
+  fabiocicerchia/rbac-auditor snapshot > rbac/prod.json
 ```
 
 A kind cluster publishes its API server on `127.0.0.1`, so add `--network host`
-(its kubeconfig embeds the certs, nothing else to mount):
+(its kubeconfig embeds the certs, nothing else to mount). If your kubeconfig
+uses an exec plugin (EKS, GKE), that binary is not in the image — use a
+token-based context, or run it in-cluster with the CronJob below.
+
+`--context NAME` picks a context when your kubeconfig has several.
+
+The file is deterministic: sorted, normalised, and with no timestamp inside it.
+Re-running against an unchanged cluster produces byte-identical output, so
+`git diff` on it is signal and nothing else. **Commit it.**
+
+It declares `"kind": "RbacSnapshot"`, which is how `diff` tells a snapshot from
+the `--json` diff report it also writes. Feeding the wrong one in is an error
+rather than a diff against an empty cluster.
 
 ```sh
-docker run --rm --network host --user "$(id -u):$(id -g)" \
-  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
-  fabiocicerchia/rbac-auditor report
+git add rbac/prod.json
+git commit -m "chore(rbac): weekly snapshot"
 ```
 
-```markdown
-# RBAC audit — 2026-08-02T09:14:22+00:00
+## See what drifted
 
-## Wildcard grants (1)
-
-- `kube-system/legacy-operator` (role) grants `*` verbs on `*` resources
-
-## cluster-admin bindings (3)
-
-- clusterrolebinding `cluster-admin` grants cluster-admin to Group:/system:masters
-- clusterrolebinding `ci-deployer` grants cluster-admin to ServiceAccount:ci/deployer
-
-## Unused ServiceAccounts (7)
-
-- ServiceAccount `staging/old-migrator` is not used by any pod
-
-## Dangling bindings (1)
-
-- rolebinding `apps/grafana-reader` references missing ServiceAccount `apps/grafana`
-
-## Inventory
-
-- roles: 42
-- clusterroles: 71
-...
-
-**12 findings.**
+```sh
+rbac-audit diff rbac/prod.json
 ```
 
-If your kubeconfig uses an exec plugin (EKS, GKE), that binary is not in the
-image. Either use a token-based context, or run it in-cluster with the CronJob
-below — which is where it belongs anyway.
+That compares the committed snapshot against the live cluster:
 
-## Read it before you gate on it
+```text
+RBAC diff — rbac/prod.json → live cluster
 
-Start with the two findings that are almost always actionable:
+~ Role/ci/deploy
+    + rule apiGroups=rbac.authorization.k8s.io resources=roles verbs=bind,escalate
+    - rule apiGroups=apps resources=deployments verbs=get,list
++ ClusterRoleBinding/ci-admin
+    roleRef ClusterRole/cluster-admin
+    + ServiceAccount ci/deployer
 
-**Dangling bindings.** A binding to a ServiceAccount that does not exist is not
-inert — Kubernetes does not reject it, and it starts granting the moment
-someone creates a SA with that name in that namespace. Delete the binding or
-create the account deliberately.
+Policy violations (2)
+  [escalating-verbs] Role/ci/deploy
+      new rule grants bind, escalate: apiGroups=rbac.authorization.k8s.io resources=roles verbs=bind,escalate
+  [cluster-admin-binding] ClusterRoleBinding/ci-admin
+      binds ServiceAccount ci/deployer to ClusterRole/cluster-admin
 
-**cluster-admin bindings.** The count is the finding. One or two is normal;
-discovering there are eleven is the point of running this.
+1 added, 0 removed, 1 changed; 2 policy violations.
+```
 
-**Unused ServiceAccounts** are usually a long list on a first run. Each is a
-token nobody watches, but working through them is a project, not a fix.
+Exit code 2, because the policy failed. That is the CI gate, and it needs no
+extra flag — `diff` is a gate by default.
 
-**Wildcard grants** are only flagged when a rule has `*` in both verbs and
-resources — the case that is nearly always accidental.
+## Diff two files, with no cluster at all
+
+```sh
+rbac-audit diff rbac/prod-2026-09-01.json rbac/prod-2026-09-08.json
+```
+
+This is the mode for a CI job that has no business holding cluster credentials:
+a scheduled job takes the snapshot and opens a pull request with it, and the
+pull request's own checks diff the two committed files. Nothing in this path
+touches kubectl.
+
+## Machine-readable output
+
+```sh
+rbac-audit diff rbac/prod.json --json drift.json     # both: text and the file
+rbac-audit diff rbac/prod.json --json - | jq .summary
+```
+
+`--json -` writes the JSON to stdout and suppresses the human report, so the
+pipe stays parseable. Both come from the same run, so they cannot disagree.
+
+```json
+{
+  "added": 1,
+  "changed": 1,
+  "exempted": 0,
+  "removed": 0,
+  "violations": 2
+}
+```
+
+## What one subject gained
+
+```sh
+rbac-audit diff rbac/prod.json --subject ServiceAccount/ci/deployer
+```
+
+```text
+NAMESPACE  RESOURCE                          *  bind escalate get list patch
+*          *.*                               +   .      .      .   .     .
+ci         deployments.apps                  .   .      .      =   =     +
+ci         roles.rbac.authorization.k8s.io   .   +      +      .   .     .
+ci         secrets.*                         .   .      .      +   .     .
+
+  + gained   - lost   = unchanged   . not granted
+```
+
+`+` is what this ServiceAccount can do today and could not last week — the
+question you actually have during an incident review.
+
+The subject is `Kind/name`, or `Kind/namespace/name` for a ServiceAccount:
+
+```sh
+rbac-audit diff old.json --subject ServiceAccount/ci/deployer
+rbac-audit diff old.json --subject Group/system:masters
+rbac-audit diff old.json --subject User/alice@example.com
+```
+
+Namespace `*` means the grant came from a ClusterRoleBinding and applies
+everywhere. Wildcards in the rules are shown as they are written rather than
+expanded into the resources they cover: expanding them needs API discovery, and
+a matrix that invented rows would be wrong in the direction that matters.
+
+The policy still runs, scoped to that subject, so the exit code means the same
+thing it does without `--subject`.
+
+## The policy
+
+With no policy file, these six rules are on:
+
+| Rule                     | Reports                                                         | Default |
+| ------------------------ | --------------------------------------------------------------- | ------- |
+| `cluster-admin-binding`  | a subject newly bound to `cluster-admin`                        | fails   |
+| `wildcard`               | a new grant with `*` in `verbs`, `resources` or `apiGroups`     | fails   |
+| `escalating-verbs`       | a new grant of `bind`, `escalate` or `impersonate`              | fails   |
+| `anonymous-subject`      | a new binding to `system:anonymous` or `system:unauthenticated` | fails   |
+| `dangling-binding`       | a binding naming a ServiceAccount that does not exist           | fails   |
+| `unused-service-account` | a ServiceAccount no pod mounts                                  | warns   |
+
+Only additions are judged, and "addition" means a permission the cluster did
+not already allow. Removing a grant never fails a build, and neither does
+narrowing one: dropping verbs from a rule, replacing `*` with named resources,
+restricting a rule to specific `resourceNames`, or splitting one rule into two
+that grant the same thing are all silent.
+
+`unused-service-account` warns instead of failing: it is hygiene rather than
+escalation, and on a first `baseline` it is usually the longest list — a gate
+that is red on day one is a gate that gets switched off. `dangling-binding`
+does fail, because it is not hygiene: Kubernetes accepts a binding to a
+ServiceAccount that does not exist and never warns when one later appears, so
+it is a privilege grant with a trigger attached.
+
+`unused-service-account` also needs the cluster's pods, which a snapshot does
+not carry. Run against files it is reported as **not checked** rather than as
+passed:
+
+```text
+Not checked (1)
+  [unused-service-account] needs the cluster's pods, which a snapshot does not carry — run it against a live cluster
+```
+
+`diff` and `baseline` read `./.rbac-policy.yaml` if it is there, or `--policy PATH`. Copy
+[`.rbac-policy.example.yaml`](https://github.com/fabiocicerchia/rbac-auditor/blob/main/.rbac-policy.example.yaml)
+to start from the defaults written out in full.
+
+## Relaxing the policy
+
+Three ways, in the order you should reach for them.
+
+**1. Exempt a specific object.** Narrowest, and the only one that leaves the
+rule working everywhere else:
+
+```yaml
+version: 1
+exempt:
+  - rule: wildcard
+    object: ClusterRole/system:*
+    reason: ships with Kubernetes, upstream-managed
+  - rule: cluster-admin-binding
+    subject: Group system:masters
+    reason: the bootstrap group, reviewed 2026-09
+```
+
+An entry constrains only the fields it names — `rule`, `object`, `subject` —
+and a value ending in `*` matches a prefix. `reason` is required: an accepted
+risk with no stated reason is indistinguishable from a mistake six months
+later. Exempted violations are still printed, under **Exempted**, each with its
+reason. Nothing disappears quietly.
+
+**2. Downgrade a rule to a warning.** It still reports, marked `(warn)`, but
+stops deciding the exit code:
+
+```yaml
+version: 1
+rules:
+  wildcard:
+    fail: false
+```
+
+**3. Turn a rule off.** It stops looking, and nothing will tell you again:
+
+```yaml
+version: 1
+rules:
+  wildcard:
+    enabled: false
+```
+
+You can also narrow a rule instead of silencing it. This one stops flagging `*`
+verbs on a named resource — often intentional — while still catching `*`
+resources and `*` apiGroups:
+
+```yaml
+version: 1
+rules:
+  wildcard:
+    fields: [resources, apiGroups]
+```
+
+Every rule's list is configurable the same way: `roles` for
+`cluster-admin-binding`, `verbs` for `escalating-verbs`, `subjects` for
+`anonymous-subject`, `ignore` for `unused-service-account` (which already
+ignores `default`, since every namespace has one and a pod naming no account
+gets it). They are lists, and the file is rejected if you write a
+bare string — `verbs: bind` instead of `verbs: [bind]` would turn a membership
+test into a substring one, and a security check that quietly stops matching is
+the thing this tool exists to prevent.
+
+A malformed policy is a fatal error rather than a warning, and an unknown rule
+name is an error rather than being ignored: a typo would otherwise leave that
+rule at its default — a check you believe you turned off and did not.
+
+To see what the policy *would* block without acting on it, pass `--no-policy`.
+Every rule still runs and every violation is still printed — marked `(warn)`,
+with `(none gating)` on the summary line — but the exit code stays 0. That is
+the flag to start with: read a week of them, then take it off.
+
+## Gate it in CI
+
+```yaml
+- name: RBAC drift
+  run: rbac-audit diff rbac/prod.json rbac/current.json
+```
+
+Exit code 2 fails the step. Start with `--no-policy` for a week, read what it
+would have blocked, then take the flag off — a check that has been red since
+the day it was added is a check that has been switched off.
 
 ## Run it weekly, in-cluster
 
@@ -80,142 +283,31 @@ kubectl apply -f manifests/cronjob.yaml
 ```
 
 That creates the CronJob, the ServiceAccount, and a read-only ClusterRole
-scoped to `get`/`list` on the RBAC kinds plus ServiceAccounts and Pods. Read it
-before applying — it is short on purpose, so it can be reviewed rather than
-trusted.
+scoped to `get`/`list` on the RBAC kinds plus ServiceAccounts. Read it before
+applying — it is short on purpose, so it can be reviewed rather than trusted.
 
-The report goes to the job's stdout, which is where your log pipeline can see
+The snapshot goes to the job's stdout, which is where your log pipeline can see
 it:
 
 ```sh
-kubectl -n security logs job/rbac-auditor-<id>
+kubectl -n security logs job/rbac-auditor-<id> > rbac/prod.json
 ```
 
-## Track drift instead of re-reading the whole thing
-
-The report tells you what is true. The diff tells you what changed, which is
-usually the question:
-
-```sh
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
-  fabiocicerchia/rbac-auditor dump > snapshots/2026-01.json
-
-# a month later
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
-  -v "$PWD/snapshots:/snapshots:ro" \
-  fabiocicerchia/rbac-auditor diff /snapshots/2026-01.json
-```
-
-```text
-+ added   clusterrolebinding ci-deployer-v2
-~ changed role apps/backend-reader
-- removed rolebinding staging/old-migrator
-```
-
-Keep the dumps in git. RBAC drift is invisible until an incident, and a
-month-over-month diff is small enough that someone will actually read it.
-
-## Ask who can do something
-
-```sh
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
-  fabiocicerchia/rbac-auditor who-can delete pods
-```
-
-**This is a lower bound, not an answer.** It does not resolve aggregated
-ClusterRoles, so subjects that get the verb through aggregation are missing
-from the output. For a definitive check on one subject, use the API server's
-own evaluation:
-
-```sh
-kubectl auth can-i delete pods --as=system:serviceaccount:ci:deployer
-```
-
-Use `who-can` to find candidates; use `auth can-i` to confirm them.
-
-## Gate on it in CI
-
-```sh
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v ~/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
-  fabiocicerchia/rbac-auditor report --fail-on-findings
-```
-
-Exit code 2 when there are findings. Do this only after you have driven the
-count to something you are prepared to keep at zero — a check that has been red
-since the day it was added is a check that has been switched off.
+> **Treat snapshots as sensitive.** One enumerates who can do what in the
+> cluster, which is a map of the permissions worth attacking. A private
+> repository, with the same care you would give the kubeconfig itself.
 
 ## Development
 
 ```sh
 make build     # docker build
-make lint      # hadolint + py_compile
-make test      # help text renders, kubectl present, script compiles
+make lint      # the whole pre-commit gate
+make test      # unit tests against fixtures, then the image smoke tests
 make release   # multi-arch buildx push
 ```
 
-## Suppressing accepted findings
-
-Accepted risks otherwise reappear on every run until the real findings are lost
-in them. A `.rbac-audit-ignore` next to the report (or `--ignore-file PATH`)
-suppresses findings by `subject`, `role` or `verb`:
-
-```text
-# The kube-system bootstrap accounts are not ours to fix.
-subject=ServiceAccount:kube-system/* reason=cluster bootstrap, upstream-managed
-
-# Break-glass access, reviewed 2026-08.
-role=cluster-admin reason=break-glass account, reviewed 2026-08
-```
-
-`reason=` is required — an accepted risk with no stated reason is
-indistinguishable from a mistake six months later. A value ending in `*`
-matches a prefix, and a rule only constrains the fields it names.
-
-Nothing disappears quietly:
-
-- suppressed findings are counted per section and listed under **Suppressed**,
-  each with its reason
-- a rule that matches nothing is reported under **Stale suppressions**, so the
-  file can be pruned as the cluster changes
-- the exit code reflects the findings that are *left* — `--fail-on-findings`
-  still fails the build for anything unsuppressed
-
-A malformed entry is a fatal error rather than a warning: a suppression nobody
-can read hides findings without saying so.
-
-See [`.rbac-audit-ignore.example`](https://github.com/fabiocicerchia/rbac-auditor/blob/main/.rbac-audit-ignore.example).
-
-## HTML reports
-
-Terminal output is fine for a person at a keyboard and no use as a
-point-in-time record. `--html` writes the same findings as a self-contained
-document — no external stylesheet, font or script, so it renders the same on an
-air-gapped laptop a year from now:
+The unit tests need neither Docker nor a cluster:
 
 ```sh
-rbac-audit report --html rbac-$(date +%F).html
+python3 -m unittest discover -s tests
 ```
-
-The header states which cluster it describes (context name *and* API server
-URL, since two kubeconfigs can name the same server differently) and when it
-was generated. Suppressions apply exactly as they do to the markdown report —
-same snapshot, same ignore file, same **Suppressed** section.
-
-Add `--s3` to upload it, with server-side encryption on by default:
-
-```sh
-rbac-audit report --html rbac.html --s3 s3://my-audit-bucket/rbac/ --sse AES256
-```
-
-Upload uses the AWS CLI, so it picks up whatever credentials are already
-configured. **A failed upload never loses the local report and never changes
-the exit code** — the audit succeeded, only its delivery did not.
-
-> **Treat these reports as sensitive.** A report enumerates who can do what in
-> the cluster, which is a map of the permissions worth attacking. Use a private
-> bucket, never a public ACL, and keep the same care you would for the
-> kubeconfig itself.

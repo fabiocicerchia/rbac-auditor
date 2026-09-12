@@ -1,0 +1,92 @@
+# .rbac-policy.yaml — what `rbac-audit diff` is willing to fail a build for.
+#
+# Copy this next to your snapshots, or point at it with --policy PATH. With no
+# file at all the defaults below apply, and every rule is on and blocking: a
+# policy that ships permissive is a policy nobody ever tightens.
+#
+# Each rule judges *additions only* — a permission the cluster did not already
+# allow. Taking a grant away never fails a build, and neither does narrowing
+# one: dropping verbs, replacing `*` with named resources, restricting a rule
+# to specific resourceNames, or splitting a rule in two are all silent.
+#
+# `rbac-audit baseline` applies this same file to a whole cluster rather than
+# to what changed in it, by treating everything as newly added. Same rules,
+# same exemptions, same exit code.
+
+version: 1
+
+rules:
+  # A subject newly bound to cluster-admin.
+  cluster-admin-binding:
+    enabled: true
+    fail: true
+    # Add your own break-glass roles here to have them treated the same way.
+    roles: [cluster-admin]
+
+  # A new rule carrying `*` in any of these fields.
+  wildcard:
+    enabled: true
+    fail: true
+    fields: [verbs, resources, apiGroups]
+
+  # A new grant of the verbs that let a subject widen its own access.
+  # `*` verbs grant these too — the wildcard rule reports that case.
+  escalating-verbs:
+    enabled: true
+    fail: true
+    verbs: [bind, escalate, impersonate]
+
+  # A new binding to an unauthenticated caller.
+  anonymous-subject:
+    enabled: true
+    fail: true
+    subjects: [system:anonymous, system:unauthenticated]
+
+  # A binding naming a ServiceAccount that does not exist. Inert today, and a
+  # live grant the moment somebody creates one with that name in that
+  # namespace — Kubernetes accepts the binding and never warns.
+  dangling-binding:
+    enabled: true
+    fail: true
+
+  # A ServiceAccount no pod mounts: a credential nobody is watching.
+  #
+  # Warns rather than blocks. It is hygiene, not escalation, and on a first
+  # `baseline` it is usually the longest list — a gate that is red on day one
+  # is a gate that gets switched off, taking the other rules with it.
+  #
+  # It needs the cluster's pods, which a snapshot does not carry. Run against
+  # files it is reported as "not checked", never as passed.
+  unused-service-account:
+    enabled: true
+    fail: false
+    # `default` is always ignored by default: every namespace has one, and a
+    # pod naming no account gets it.
+    ignore: [default]
+
+# Relaxing the policy, in order of how little you should reach for it:
+#
+#   1. `exempt:` a specific object, with a reason. Narrowest, and the only one
+#      that leaves the rule working everywhere else.
+#   2. `fail: false` on a rule — it still reports, marked (warn), but stops
+#      deciding the exit code.
+#   3. `enabled: false` — the rule stops looking. Nothing will tell you again.
+#
+# To read what the gate would block without acting on it, pass --no-policy: the
+# violations are still printed, marked (warn), and the exit code stays 0.
+#
+# Every list below has to stay a list. `verbs: bind` instead of `verbs: [bind]`
+# is rejected rather than quietly turned into a substring match.
+#
+# An exemption constrains only the fields it names (`rule`, `object`,
+# `subject`), a value ending in `*` matches a prefix, and `reason` is required:
+# an accepted risk with no stated reason is indistinguishable from a mistake
+# six months later. Exempted violations are still listed, under "Exempted".
+exempt:
+  - rule: wildcard
+    object: ClusterRole/system:*
+    reason: ships with Kubernetes, upstream-managed
+
+  - rule: cluster-admin-binding
+    subject: Group system:masters
+    reason: the bootstrap group, reviewed 2026-09

@@ -1,14 +1,14 @@
 IMAGE     ?= fabiocicerchia/rbac-auditor
 VERSION   ?= 0.1.0
 PLATFORMS ?= linux/amd64,linux/arm64
-# Subcommand for `make run`: report, dump, diff <file>, who-can VERB RESOURCE
-ARGS      ?= report
+# Subcommand for `make run`: snapshot, or diff <file> [<file>]
+ARGS      ?= snapshot
 
 # Every verb this repository exposes lives here; `make` on its own prints them.
 # FC-GEN-057: the same eight verbs in every repo, each either wired or a
 # declared no-op that says why. None of them exit 0 quietly.
 
-.PHONY: help setup install build run test lint format analyze push release
+.PHONY: help setup install build run test test-unit lint format analyze push release
 
 .DEFAULT_GOAL := help
 
@@ -27,12 +27,19 @@ build: ## Build the image locally
 
 # Read-only mount of your kubeconfig, and the container runs as you: the tool
 # only ever reads RBAC, and nothing it writes should land as root.
-run: build ## Audit the cluster in your kubeconfig (ARGS=report by default)
+run: build ## Snapshot the cluster in your kubeconfig (ARGS=snapshot by default)
 	docker run --rm --user "$(shell id -u):$(shell id -g)" \
 		-v $(HOME)/.kube/config:/kubeconfig:ro -e KUBECONFIG=/kubeconfig \
 		$(IMAGE):$(VERSION) $(ARGS)
 
-test: build ## Build, then run the smoke tests
+test-unit: ## Unit tests only — no Docker, no cluster, no image build
+	python3 -m unittest discover -s tests
+
+# `build` is invoked from the recipe rather than declared a prerequisite:
+# prerequisites run first, and the point is that a logic error fails in
+# seconds instead of after an image build.
+test: test-unit ## Unit tests, then build and run the image smoke tests
+	$(MAKE) build
 	./test.sh $(IMAGE):$(VERSION)
 
 lint: ## Run the whole gate — every hook, every file

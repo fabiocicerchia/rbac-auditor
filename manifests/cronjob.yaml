@@ -1,4 +1,5 @@
-# Weekly RBAC report into the job logs (ship with your log pipeline).
+# Weekly RBAC snapshot into the job logs (ship with your log pipeline, or
+# redirect it into a repository you commit).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -24,13 +25,13 @@ spec:
               # Pinned: the bare name resolved to :latest, which would silently
               # change what this cluster-reader runs. Matches publish.yml.
               image: ghcr.io/fabiocicerchia/rbac-auditor:1.0.0
-              args: ["report"]
+              args: ["snapshot"]
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
                 capabilities:
                   drop: [ALL]
-              # It reads the RBAC API and writes a report to stdout; no CPU
+              # It reads the RBAC API and writes a snapshot to stdout; no CPU
               # limit on purpose, since throttling a weekly job buys nothing.
               resources:
                 requests: { cpu: 50m, memory: 128Mi }
@@ -47,6 +48,8 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: [roles, clusterroles, rolebindings, clusterrolebindings]
     verbs: [get, list]
+  # pods is for the unused-ServiceAccount rule: an account no pod mounts
+  # cannot be found from RBAC objects alone. They never enter the snapshot.
   - apiGroups: [""]
     resources: [serviceaccounts, pods]
     verbs: [get, list]

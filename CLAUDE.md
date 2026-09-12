@@ -4,21 +4,30 @@ Guidance for Claude Code (and other AI agents) working in this repo.
 
 ## Project
 
-Dumps and diffs Kubernetes **RBAC into readable reports**: wildcard
-grants, cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus
-`who-can` queries and snapshot diffing for change tracking. RBAC drift is
-invisible until an incident; this makes it a weekly markdown artifact.
-Manifests in `manifests/`, Helm `chart/`.
+Snapshots Kubernetes **RBAC to a committable JSON file**, then diffs two
+snapshots — or one against the live cluster — under a policy that decides the
+exit code. RBAC drift is invisible until an incident; this makes it a pull
+request. Manifests in `manifests/`, Helm `chart/`.
+
+Point-in-time *queries* (`who-can`, access matrices, wildcard listing) were
+removed in 2.0 and belong to rakkess / rbac-tool / rbac-lookup. Don't
+reintroduce them. Findings that correlate RBAC against cluster inventory
+(dangling bindings, unused ServiceAccounts) are **not** in that category —
+those tools don't do them — and live on as policy rules.
+
+`baseline` is `diff` against an empty cluster, so day one gets an audit before
+there is anything to diff against. One engine, one set of rules.
 
 ## Commands
 
 ```sh
 make help         # every verb this repo exposes
 make setup        # Install the pre-commit hook
-make install      # Pull the published image
+make install      # pip install . — the CLI and its man page
 make build        # Build the image locally
-make run          # Audit the cluster in your kubeconfig (ARGS=report)
-make test         # Build, then run the smoke tests
+make run          # Snapshot the cluster in your kubeconfig (ARGS=snapshot)
+make test-unit    # Unit tests only — no Docker, no cluster
+make test         # Build, then the unit tests and the image smoke tests
 make lint         # pre-commit run --all-files — the whole gate
 make format       # ruff format .
 make analyze      # trivy fs
@@ -49,8 +58,16 @@ make release      # Multi-arch buildx build and push (version + latest)
 
 - Pin every version and leave a `# VERSION-BUMP` comment beside it.
 - `test.sh` runs against the built image — a new capability needs a case there.
+- A new policy rule needs a test for it firing *and* for it not firing on the
+  change that looks like it; `tests/fixtures/` is the input for both.
 - Read-only: the auditor never mutates cluster state, and its own RBAC stays
   least-privilege (see `manifests/`).
-- Reports are diffed week over week — keep output deterministically ordered.
+- Snapshots are committed and diffed week over week — keep them deterministically
+  ordered, and never put a timestamp inside the payload. Pods stay out: their
+  names change every rollout. A rule needing them reads the cluster at
+  evaluation time and is reported as "not checked" when there isn't one.
+- A check that can't run says so. Never let one silently pass.
+- Lint with the ruff pinned in `.pre-commit-config.yaml`, not whatever `ruff`
+  is on PATH — the versions differ and the gate uses the pinned one.
 - Don't touch generated files or lockfiles by hand.
 - Ask before large refactors or destructive operations.
