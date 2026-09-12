@@ -14,6 +14,22 @@ cluster-admin bindings, unused ServiceAccounts, dangling bindings, plus
 RBAC drift is invisible until an incident. This makes it a weekly markdown
 report a human actually reads.
 
+## Features
+
+- Turns Kubernetes RBAC into a **markdown report a human actually reads**,
+  rather than a wall of YAML — RBAC drift is invisible until an incident.
+- Finds wildcard grants, cluster-admin bindings, unused ServiceAccounts and
+  dangling bindings.
+- `who-can VERB RESOURCE` answers the question you actually have — who can
+  `delete pods`.
+- **Snapshot and diff**: `dump` archives a JSON snapshot, `diff` reports added,
+  removed and changed roles and bindings against it, so month-over-month drift
+  is visible.
+- `--fail-on-findings` gates CI, `--ignore-file` carries the exceptions you
+  have accepted, `--html` produces something shareable.
+- Runs read-only in-cluster on a schedule — the CronJob and its ClusterRole
+  are in `manifests/` — or locally against your kubeconfig.
+
 ## Commands
 
 | Command                 | Output                                                                                                                               |
