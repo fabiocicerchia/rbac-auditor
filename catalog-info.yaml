@@ -1,0 +1,23 @@
+# Backstage catalog entry, read by paved's scorecard plugin.
+#
+# Every check paved scores is derived from this file alone — no cluster
+# access, no CI credentials. What is absent here is absent from the score.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: rbac-auditor
+  description: >-
+      Dumps and diffs Kubernetes RBAC into readable reports: wildcard grants, cluster-admin bindings,
+      unused ServiceAccounts, dangling bindings, plus who-can queries and snapshot diffing for change…
+  annotations:
+    github.com/project-slug: fabiocicerchia/rbac-auditor
+    backstage.io/source-location: url:https://github.com/fabiocicerchia/rbac-auditor/
+    backstage.io/techdocs-ref: dir:.
+  links:
+    - url: https://github.com/fabiocicerchia/rbac-auditor
+      title: Source
+spec:
+  type: library
+  lifecycle: production
+  owner: group:default/kodebeat
+  system: oss-tools
