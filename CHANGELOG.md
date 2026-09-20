@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v2.0.0...v2.0.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* **ci:** keep actions: read on the job that uploads sarif ([#82](https://github.com/fabiocicerchia/rbac-auditor/issues/82)) ([aa96d99](https://github.com/fabiocicerchia/rbac-auditor/commit/aa96d99515f25767b4fd6e68360ddaf4c2c70fa4))
+
 ## [2.0.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v1.3.1...v2.0.0) (2026-09-12)
 
 
