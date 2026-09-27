@@ -3,6 +3,5 @@
 Open items only. Completed work is dropped from here — the CHANGELOG
 is the record of what shipped.
 
-- [ ] `snapshot --from-manifests DIR`, so a diff can run against RBAC YAML in a
-      pull request before it is applied
-- [ ] A policy rule for a new binding to `system:masters`
+Nothing open. The remaining work is tracked in
+[the issue list](https://github.com/fabiocicerchia/rbac-auditor/issues).
