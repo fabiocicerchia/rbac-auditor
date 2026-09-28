@@ -9,7 +9,7 @@ Dockerfile and rbac_audit.py. The published container image redistributes
 the following third-party software, each under its own license:
 
   kubectl 1.33.2  Apache-2.0  https://github.com/kubernetes/kubernetes
-  PyYAML 6.0.2    MIT         https://github.com/yaml/pyyaml
+  PyYAML 6.0.3    MIT         https://github.com/yaml/pyyaml
 
 --------------------------------------------------------------------
 Kubernetes (kubectl)
