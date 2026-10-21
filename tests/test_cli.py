@@ -90,7 +90,7 @@ class ExitCodeTest(unittest.TestCase):
             code, _ = run(["diff", str(path), AFTER])
         self.assertEqual(code, ra.EXIT_DATAERR)
 
-    def test_an_unparseable_policy_exits_65(self):
+    def test_an_unparsable_policy_exits_65(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.yaml"
             path.write_text("rules:\n  wildcards:\n    enabled: false\n")
