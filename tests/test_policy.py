@@ -738,6 +738,24 @@ class PolicyFileTest(unittest.TestCase):
         self.assertEqual(sorted(policy["rules"]), sorted(ra.CHECKS))
         self.assertTrue(policy["exempt"])
 
+    def test_the_example_exempts_only_the_bootstrap_masters_binding(self):
+        """The documented exemption is scoped by object, so the binding every
+        cluster ships passes and a second binding to the group still fires."""
+        path = Path(__file__).resolve().parent.parent / ".rbac-policy.example.yaml"
+        policy = ra.merge_policy(yaml.safe_load(path.read_text()))
+        masters = {"kind": "Group", "name": "system:masters"}
+        new = snapshot(
+            clusterRoleBindings=[
+                binding("cluster-admin", "cluster-admin", [masters]),
+                binding("breakglass", "view", [masters]),
+            ]
+        )
+        violations, _ = verdict(snapshot(), new, policy)
+        self.assertEqual(
+            [(v["rule"], v["object"]) for v in violations],
+            [("masters-subject", "ClusterRoleBinding/breakglass")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

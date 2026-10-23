@@ -256,10 +256,11 @@ Every rule's list is configurable the same way: `roles` for
 `cluster-admin-binding`, `verbs` for `escalating-verbs`, `subjects` for
 `anonymous-subject` and `masters-subject`, `ignore` for
 `unused-service-account` (which already ignores `default`, since every
-namespace has one and a pod naming no account gets it). They are lists, and the file is rejected if you write a
-bare string — `verbs: bind` instead of `verbs: [bind]` would turn a membership
-test into a substring one, and a security check that quietly stops matching is
-the thing this tool exists to prevent.
+namespace has one and a pod naming no account gets it). They are lists, and the
+file is rejected if you write a bare string — `verbs: bind` instead of
+`verbs: [bind]` would turn a membership test into a substring one, and a
+security check that quietly stops matching is the thing this tool exists to
+prevent.
 
 A malformed policy is a fatal error rather than a warning, and an unknown rule
 name is an error rather than being ignored: a typo would otherwise leave that

@@ -177,8 +177,8 @@ stay two findings, because they are two different things to go and fix.
 
 ## The policy
 
-Seven rules, all on and all but one blocking by default, because a gate that ships
-permissive is a gate nobody ever tightens:
+Seven rules, all on and all but one blocking by default, because a gate that
+ships permissive is a gate nobody ever tightens:
 
 | Rule                     | Reports                                                         | Default |
 | ------------------------ | --------------------------------------------------------------- | ------- |
