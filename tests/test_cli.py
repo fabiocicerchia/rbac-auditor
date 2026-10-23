@@ -522,6 +522,40 @@ class FromManifestsTest(unittest.TestCase):
             code, _ = run(["snapshot", "--from-manifests", tmp])
         self.assertEqual(code, ra.EXIT_DATAERR)
 
+    def test_a_json_manifest_is_read_like_kubectl_reads_it(self):
+        """`kubectl apply -f DIR` applies .json files too, so a binding there
+        must reach the gate rather than pass unseen."""
+        binding = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRoleBinding",
+            "metadata": {"name": "sneaky"},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "cluster-admin",
+            },
+            "subjects": [{"kind": "User", "name": "mallory"}],
+        }
+        role = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": {"name": "streamed"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            # Tab-indented, which PyYAML would refuse, and two values in a row.
+            text = json.dumps(binding, indent="\t") + "\n" + json.dumps(role)
+            (Path(tmp) / "x.json").write_text(text)
+            code, snap = self.snapshot(tmp)
+            self.assertEqual(code, ra.EXIT_OK)
+            snap = json.loads(snap)
+            self.assertEqual(
+                [b["name"] for b in snap["clusterRoleBindings"]], ["sneaky"]
+            )
+            self.assertEqual([r["name"] for r in snap["clusterRoles"]], ["streamed"])
+            (Path(tmp) / "x.json").write_text("{not json")
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
     def test_a_kind_list_is_unwrapped(self):
         lst = (
             "apiVersion: v1\nkind: List\nitems:\n"

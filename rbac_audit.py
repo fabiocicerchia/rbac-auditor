@@ -239,7 +239,9 @@ def capture(context=None):
 # them would read as those grants not existing.
 MANIFEST_GROUPS = {kind: "rbac.authorization.k8s.io" for _, kind, _, _ in SECTIONS}
 MANIFEST_GROUPS["ServiceAccount"] = ""
-MANIFEST_SUFFIXES = (".yaml", ".yml")
+# The extensions `kubectl apply -f DIR` reads. Skipping one it applies would
+# let a pull request bind cluster-admin in a file the gate never opened.
+MANIFEST_SUFFIXES = (".yaml", ".yml", ".json")
 NAMESPACED_KINDS = {"Role", "RoleBinding", "ServiceAccount"}
 
 
@@ -253,8 +255,21 @@ def _api_group(api_version):
     return group
 
 
+def _json_documents(text):
+    """Every JSON value in `text`: kubectl reads a .json file as a stream."""
+    decoder = json.JSONDecoder()
+    pos = 0
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos == len(text):
+            return
+        document, pos = decoder.raw_decode(text, pos)
+        yield document
+
+
 def manifest_documents(directory):
-    """(path, document) for every YAML document under `directory`.
+    """(path, document) for every YAML or JSON document under `directory`.
 
     Walked in sorted order, so the same tree produces the same snapshot on any
     filesystem. A `kind: List` is unwrapped, as kubectl would.
@@ -269,7 +284,14 @@ def manifest_documents(directory):
             path = os.path.join(root, name)
             with open(path, encoding="utf-8") as fh:
                 try:
-                    documents = list(yaml.safe_load_all(fh))
+                    if name.endswith(".json"):
+                        # JSON is not quite a YAML subset: PyYAML refuses the
+                        # tab indentation many JSON writers emit.
+                        documents = list(_json_documents(fh.read()))
+                    else:
+                        documents = list(yaml.safe_load_all(fh))
+                except json.JSONDecodeError as err:
+                    raise ManifestError(f"{path}: not JSON: {err}") from None
                 except (yaml.YAMLError, UnicodeDecodeError) as err:
                     raise ManifestError(f"{path}: not YAML: {err}") from None
             for document in documents:

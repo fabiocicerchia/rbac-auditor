@@ -37,7 +37,7 @@ which is what distinguishes it from the
 .B \-\-json
 diff report. With
 .BI \-\-from\-manifests " DIR"
-it reads the RBAC kinds and ServiceAccounts from the YAML files under
+it reads the RBAC kinds and ServiceAccounts from the YAML and JSON files under
 .I DIR
 instead of a cluster, needs no
 .BR kubectl ,
@@ -78,9 +78,10 @@ and refused alongside
 .BI \-\-from\-manifests " DIR"
 .B snapshot
 only: read every
-.I *.yaml
-and
+.IR *.yaml ,
 .I *.yml
+and
+.I *.json
 under
 .I DIR
 instead of a cluster. Objects of other kinds are ignored; one defined twice is
