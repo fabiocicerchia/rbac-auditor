@@ -268,6 +268,21 @@ def _json_documents(text):
         yield document
 
 
+def _read_documents(path):
+    """Every document in one manifest file, or ManifestError if it will not parse."""
+    with open(path, encoding="utf-8") as fh:
+        try:
+            if path.endswith(".json"):
+                # JSON is not quite a YAML subset: PyYAML refuses the tab
+                # indentation many JSON writers emit.
+                return list(_json_documents(fh.read()))
+            return list(yaml.safe_load_all(fh))
+        except json.JSONDecodeError as err:
+            raise ManifestError(f"{path}: not JSON: {err}") from None
+        except (yaml.YAMLError, UnicodeDecodeError) as err:
+            raise ManifestError(f"{path}: not YAML: {err}") from None
+
+
 def manifest_documents(directory):
     """(path, document) for every YAML or JSON document under `directory`.
 
@@ -282,19 +297,7 @@ def manifest_documents(directory):
             if not name.endswith(MANIFEST_SUFFIXES):
                 continue
             path = os.path.join(root, name)
-            with open(path, encoding="utf-8") as fh:
-                try:
-                    if name.endswith(".json"):
-                        # JSON is not quite a YAML subset: PyYAML refuses the
-                        # tab indentation many JSON writers emit.
-                        documents = list(_json_documents(fh.read()))
-                    else:
-                        documents = list(yaml.safe_load_all(fh))
-                except json.JSONDecodeError as err:
-                    raise ManifestError(f"{path}: not JSON: {err}") from None
-                except (yaml.YAMLError, UnicodeDecodeError) as err:
-                    raise ManifestError(f"{path}: not YAML: {err}") from None
-            for document in documents:
+            for document in _read_documents(path):
                 if not isinstance(document, dict):
                     continue  # an empty document between two `---`
                 if document.get("kind") == "List":
@@ -330,12 +333,13 @@ def capture_manifests(directory):
         if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
             raise ManifestError(f"{path}: a {kind} with no metadata.name")
         document = copy.deepcopy(document)
+        meta = document["metadata"]
         if kind in NAMESPACED_KINDS:
-            document["metadata"].setdefault("namespace", "default")
+            meta.setdefault("namespace", "default")
         else:
             # The API server drops a namespace on a cluster-scoped object.
-            document["metadata"].pop("namespace", None)
-        key = (document["metadata"].get("namespace", ""), meta["name"])
+            meta.pop("namespace", None)
+        key = (meta.get("namespace", ""), meta["name"])
         if key in by_kind[kind]:
             first = by_kind[kind][key][0]
             raise ManifestError(
