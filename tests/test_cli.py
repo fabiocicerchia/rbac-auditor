@@ -445,10 +445,6 @@ class SubjectCommandTest(unittest.TestCase):
         self.assertIn("no permissions", out.lower())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 MANIFESTS = str(FIXTURES / "manifests")
 
 
@@ -519,6 +515,43 @@ class FromManifestsTest(unittest.TestCase):
             code, _ = run(["snapshot", "--from-manifests", tmp])
         self.assertEqual(code, ra.EXIT_DATAERR)
 
+    def test_a_file_that_is_not_text_is_a_data_error(self):
+        """A binary file with a .yaml name is a message, not a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bad.yaml").write_bytes(b"\xff\xfe\x00k")
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_a_kind_list_is_unwrapped(self):
+        lst = (
+            "apiVersion: v1\nkind: List\nitems:\n"
+            "- apiVersion: rbac.authorization.k8s.io/v1\n"
+            "  kind: ClusterRole\n  metadata:\n    name: from-list\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "list.yaml").write_text(lst)
+            code, text = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertEqual(
+            [r["name"] for r in json.loads(text)["clusterRoles"]], ["from-list"]
+        )
+
+    def test_a_namespace_on_a_cluster_scoped_object_is_dropped(self):
+        """The API server ignores it, so two copies differing only in it are
+        still the same object."""
+        role = (
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+            "metadata:\n  name: x\n  namespace: {}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.yaml").write_text(role.format("a"))
+            code, text = self.snapshot(tmp)
+            self.assertEqual(code, ra.EXIT_OK)
+            self.assertNotIn("namespace", json.loads(text)["clusterRoles"][0])
+            (Path(tmp) / "b.yaml").write_text(role.format("b"))
+            code, _ = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
     def test_an_object_defined_twice_is_a_data_error(self):
         """Which copy the cluster gets depends on apply order; guessing would
         gate a cluster nobody will run."""
@@ -542,3 +575,7 @@ class FromManifestsTest(unittest.TestCase):
         self.assertEqual(code, ra.EXIT_OK)
         self.assertIn("Not checked (1)", out)
         self.assertIn("unused-service-account", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -267,10 +267,10 @@ def manifest_documents(directory):
             if not name.endswith(MANIFEST_SUFFIXES):
                 continue
             path = os.path.join(root, name)
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 try:
                     documents = list(yaml.safe_load_all(fh))
-                except yaml.YAMLError as err:
+                except (yaml.YAMLError, UnicodeDecodeError) as err:
                     raise ManifestError(f"{path}: not YAML: {err}") from None
             for document in documents:
                 if not isinstance(document, dict):
