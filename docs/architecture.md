@@ -177,7 +177,7 @@ stay two findings, because they are two different things to go and fix.
 
 ## The policy
 
-Four rules, all on and all blocking by default, because a gate that ships
+Seven rules, all on and all but one blocking by default, because a gate that ships
 permissive is a gate nobody ever tightens:
 
 | Rule                     | Reports                                                         | Default |
@@ -186,6 +186,7 @@ permissive is a gate nobody ever tightens:
 | `wildcard`               | a new grant with `*` in `verbs`, `resources` or `apiGroups`     | blocks  |
 | `escalating-verbs`       | a new grant of `bind`, `escalate` or `impersonate`              | blocks  |
 | `anonymous-subject`      | a new binding to `system:anonymous` or `system:unauthenticated` | blocks  |
+| `masters-subject`        | a new binding to `system:masters`, which bypasses RBAC          | blocks  |
 | `dangling-binding`       | a binding naming a ServiceAccount that does not exist           | blocks  |
 | `unused-service-account` | a ServiceAccount no pod mounts                                  | warns   |
 
@@ -198,22 +199,22 @@ cluster-admin is a gate people route around.
 and `impersonate` too, but the `wildcard` rule already reports that grant.
 Saying it twice trains people to skim the list.
 
-**`unused-service-account` warns where the rest block.** The other five say
+**`unused-service-account` warns where the rest block.** The other six say
 something got more dangerous; this one says something is untidy. On a first
 `baseline` it is also usually the longest list, and a gate that is red on day
-one is a gate somebody switches off — taking the other five with it.
+one is a gate somebody switches off — taking the other six with it.
 
 **`dangling-binding` blocks.** It looks like hygiene and is not: Kubernetes
 accepts a binding to a subject that does not exist and never warns when the
 subject later appears. The binding simply starts granting. It is a privilege
 grant with a trigger attached.
 
-`cluster-admin-binding` reads `newlyGranted` and `anonymous-subject` reads
-`subjects.added`, which is not an inconsistency. The first watches *the role*:
-re-pointing a binding at cluster-admin gives it to every subject already in
-the binding. The second watches *the subject*: one already named by the binding
-is not newly bound to it, so narrowing that binding's role is not a new
-anonymous grant.
+`cluster-admin-binding` reads `newlyGranted`, and `anonymous-subject` and
+`masters-subject` read `subjects.added`, which is not an inconsistency. The
+first watches *the role*: re-pointing a binding at cluster-admin gives it to
+every subject already in the binding. The other two watch *the subject*: one
+already named by the binding is not newly bound to it, so narrowing that
+binding's role is not a new anonymous or break-glass grant.
 
 A malformed policy file is fatal, and an unknown rule name is an error rather
 than a warning: a typo would otherwise leave that rule at its default — a check

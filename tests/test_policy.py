@@ -228,6 +228,50 @@ class AnonymousSubjectTest(unittest.TestCase):
         )
 
 
+class MastersSubjectTest(unittest.TestCase):
+    """system:masters is admitted before RBAC is consulted, so neither the
+    roleRef rule nor the anonymous one would ever see a binding to it."""
+
+    masters: ClassVar[dict] = {"kind": "Group", "name": "system:masters"}
+
+    def test_a_new_binding_to_system_masters_fires(self):
+        violations, _ = verdict(
+            snapshot(),
+            snapshot(clusterRoleBindings=[binding("x", "view", [self.masters])]),
+        )
+        self.assertEqual(rules_fired(violations), ["masters-subject"])
+        self.assertTrue(violations[0]["fail"])
+        self.assertEqual(violations[0]["subject"], "Group system:masters")
+
+    def test_narrowing_a_binding_to_system_masters_does_not_fire(self):
+        """The group was already bound here; a smaller role is a tightening."""
+        violations, _ = verdict(
+            snapshot(clusterRoleBindings=[binding("b", "edit", [self.masters])]),
+            snapshot(clusterRoleBindings=[binding("b", "view", [self.masters])]),
+        )
+        self.assertEqual(violations, [])
+
+    def test_the_subjects_list_is_configurable(self):
+        breakglass = {"kind": "Group", "name": "corp:breakglass"}
+        violations, _ = verdict(
+            snapshot(),
+            snapshot(clusterRoleBindings=[binding("x", "view", [breakglass])]),
+            ra.merge_policy(
+                {"rules": {"masters-subject": {"subjects": ["corp:breakglass"]}}}
+            ),
+        )
+        self.assertEqual(rules_fired(violations), ["masters-subject"])
+
+    def test_it_is_exempted_separately_from_anonymous_subject(self):
+        anon = {"kind": "Group", "name": "system:unauthenticated"}
+        violations, _ = verdict(
+            snapshot(),
+            snapshot(clusterRoleBindings=[binding("x", "view", [self.masters, anon])]),
+            ra.merge_policy({"rules": {"masters-subject": {"enabled": False}}}),
+        )
+        self.assertEqual(rules_fired(violations), ["anonymous-subject"])
+
+
 class DanglingBindingTest(unittest.TestCase):
     """Kubernetes accepts a binding to a ServiceAccount that does not exist and
     never warns when the subject later appears — it just starts granting."""
@@ -580,7 +624,12 @@ class RelaxingTest(unittest.TestCase):
                         "rule": "cluster-admin-binding",
                         "subject": "Group system:masters",
                         "reason": "the bootstrap group",
-                    }
+                    },
+                    {
+                        "rule": "masters-subject",
+                        "subject": "Group system:masters",
+                        "reason": "the bootstrap group",
+                    },
                 ]
             }
         )
@@ -593,7 +642,11 @@ class RelaxingTest(unittest.TestCase):
         )
         violations, exempted = verdict(snapshot(), new, policy)
         self.assertEqual(violations, [])
-        self.assertEqual(len(exempted), 1)
+        # One finding per rule: the role and the group are separate grants.
+        self.assertEqual(
+            sorted(v["rule"] for v in exempted),
+            ["cluster-admin-binding", "masters-subject"],
+        )
 
 
 class PolicyFileTest(unittest.TestCase):
