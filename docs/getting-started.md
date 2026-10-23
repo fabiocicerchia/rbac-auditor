@@ -272,6 +272,31 @@ the flag to start with: read a week of them, then take it off.
   run: rbac-audit diff rbac/prod.json rbac/current.json
 ```
 
+### On the pull request that changes the RBAC
+
+Where the RBAC lives as YAML in the repository, the gate can judge the change
+before it is merged rather than after it is applied. `--from-manifests` reads
+the directory instead of a cluster — no kubectl, no credentials:
+
+```yaml
+- name: RBAC gate
+  run: |
+    rbac-audit snapshot --from-manifests deploy/ -o /tmp/proposed.json
+    rbac-audit diff rbac/prod.json /tmp/proposed.json
+```
+
+It walks every `*.yaml` and `*.yml` under the directory, multi-document files
+included, and keeps the RBAC kinds and ServiceAccounts; everything else is
+ignored. The result is the same format as a cluster snapshot, so `diff` and
+`baseline` take it as they take any other file. A namespaced object with no
+`metadata.namespace` is read as `default`, as `kubectl apply` without `-n`
+would; an object defined twice is an error, since which copy wins depends on
+apply order. Render Helm charts or kustomize overlays to a directory first.
+
+`unused-service-account` needs the cluster's pods, which no manifest supplies,
+so on this path it is reported under "Not checked" — never as passed.
+`--context` with `--from-manifests` is refused rather than one quietly winning.
+
 Exit code 2 fails the step. Start with `--no-policy` for a week, read what it
 would have blocked, then take the flag off — a check that has been red since
 the day it was added is a check that has been switched off.

@@ -447,3 +447,98 @@ class SubjectCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MANIFESTS = str(FIXTURES / "manifests")
+
+
+class FromManifestsTest(unittest.TestCase):
+    """`snapshot --from-manifests` is what lets the gate run on a pull request:
+    snapshot the proposed YAML, diff it against the committed baseline."""
+
+    def snapshot(self, directory=MANIFESTS):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snap.json"
+            code, _ = run(["snapshot", "--from-manifests", directory, "-o", str(path)])
+            return code, (path.read_text() if path.exists() else None)
+
+    def test_it_keeps_rbac_and_service_accounts_and_nothing_else(self):
+        code, text = self.snapshot()
+        self.assertEqual(code, ra.EXIT_OK)
+        snap = json.loads(text)
+        self.assertEqual(snap["apiVersion"], ra.SNAPSHOT_VERSION)
+        self.assertEqual(snap["kind"], ra.SNAPSHOT_KIND)
+        # Both documents of the multi-document file, and the .yml file.
+        self.assertEqual([ra.object_id(r) for r in snap["roles"]], ["ci/deployer"])
+        self.assertEqual(
+            [ra.object_id(b) for b in snap["roleBindings"]], ["ci/deployer"]
+        )
+        self.assertEqual(
+            [b["name"] for b in snap["clusterRoleBindings"]], ["platform-admins"]
+        )
+        # The ConfigMap and the non-RBAC `Role` are gone without complaint.
+        self.assertEqual(snap["clusterRoles"], [])
+        self.assertEqual(
+            [ra.object_id(sa) for sa in snap["serviceAccounts"]],
+            ["ci/deployer", "default/builder"],
+        )
+        # A subject's namespace is resolved from its binding, as for a cluster.
+        self.assertEqual(
+            snap["roleBindings"][0]["subjects"],
+            [{"kind": "ServiceAccount", "name": "deployer", "namespace": "ci"}],
+        )
+
+    def test_it_is_the_committed_format_and_reloads_as_a_snapshot(self):
+        _, text = self.snapshot()
+        self.assertEqual(text, ra.dump_snapshot(json.loads(text)))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snap.json"
+            path.write_text(text)
+            ra.load_snapshot(str(path))  # exits on a snapshot it cannot read
+
+    def test_the_same_tree_gives_the_same_bytes(self):
+        self.assertEqual(self.snapshot()[1], self.snapshot()[1])
+
+    def test_kubectl_is_never_called(self):
+        with mock.patch("rbac_audit.kubectl_json") as kubectl:
+            code, _ = self.snapshot()
+        self.assertEqual(code, ra.EXIT_OK)
+        kubectl.assert_not_called()
+
+    def test_context_and_from_manifests_together_are_refused(self):
+        code, _ = run(["snapshot", "--from-manifests", MANIFESTS, "--context", "prod"])
+        self.assertEqual(code, ra.EXIT_USAGE)
+
+    def test_a_missing_directory_is_no_input(self):
+        code, _ = run(["snapshot", "--from-manifests", str(FIXTURES / "nope")])
+        self.assertEqual(code, ra.EXIT_NOINPUT)
+
+    def test_broken_yaml_is_a_data_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bad.yaml").write_text("kind: Role\n  : [unclosed\n")
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_an_object_defined_twice_is_a_data_error(self):
+        """Which copy the cluster gets depends on apply order; guessing would
+        gate a cluster nobody will run."""
+        role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: x\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.yaml").write_text(role)
+            (Path(tmp) / "b.yaml").write_text(role)
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_the_pull_request_gate(self):
+        """Snapshot the PR's manifests, diff against the committed baseline,
+        gate on the exit code — with the pod-dependent rule reported as not
+        checked rather than passed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "base.json"
+            empty.write_text(ra.dump_snapshot(ra.empty_snapshot()))
+            proposed = Path(tmp) / "pr.json"
+            run(["snapshot", "--from-manifests", MANIFESTS, "-o", str(proposed)])
+            code, out = run(["diff", str(empty), str(proposed)])
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertIn("Not checked (1)", out)
+        self.assertIn("unused-service-account", out)

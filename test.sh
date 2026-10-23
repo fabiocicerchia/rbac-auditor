@@ -115,5 +115,11 @@ if [ "$rc" -ne 65 ]; then
   exit 1
 fi
 
+# A manifest directory snapshots with no kubectl config at all, and the result
+# is a snapshot the gate reads like any other.
+run snapshot --from-manifests /fixtures/manifests -o /out/manifests.json
+grep -q '"kind": "RbacSnapshot"' "$WORK/manifests.json"
+run diff /out/manifests.json /out/manifests.json | grep -q "No changes."
+
 rm -f /tmp/diff.txt /tmp/narrow.txt /tmp/base.txt /tmp/dangle.txt
 echo PASS

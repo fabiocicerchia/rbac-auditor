@@ -4,6 +4,9 @@
 Commands:
   snapshot            deterministic JSON of Roles, ClusterRoles, bindings and
                       ServiceAccounts, meant to be committed to a repository
+  snapshot --from-manifests DIR
+                      the same snapshot read from YAML files instead of a
+                      cluster, so the gate can run on a pull request
   baseline [SNAP]     apply the policy to a whole cluster rather than to what
                       changed in it — the day-one audit, before there is
                       anything to diff against
@@ -24,6 +27,7 @@ import argparse
 import copy
 import json
 import logging
+import os
 import subprocess
 import sys
 
@@ -225,6 +229,100 @@ def capture(context=None):
     snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
     for key, _kind, resource, normalize in SECTIONS:
         items = [normalize(obj) for obj in kubectl_json(resource, context)]
+        snap[key] = sorted(items, key=object_id)
+    return snap
+
+
+# What a manifest's apiVersion has to say for each kind the snapshot carries.
+# A ServiceAccount is core/v1; everything else is the RBAC group, at any
+# version — v1beta1 manifests still exist in old repositories, and refusing
+# them would read as those grants not existing.
+MANIFEST_GROUPS = {kind: "rbac.authorization.k8s.io" for _, kind, _, _ in SECTIONS}
+MANIFEST_GROUPS["ServiceAccount"] = ""
+MANIFEST_SUFFIXES = (".yaml", ".yml")
+NAMESPACED_KINDS = {"Role", "RoleBinding", "ServiceAccount"}
+
+
+class ManifestError(Exception):
+    """A manifest directory that cannot be turned into a snapshot."""
+
+
+def _api_group(api_version):
+    """`rbac.authorization.k8s.io/v1` -> `rbac.authorization.k8s.io`; `v1` -> ``."""
+    group, _, _version = (api_version or "").rpartition("/")
+    return group
+
+
+def manifest_documents(directory):
+    """(path, document) for every YAML document under `directory`.
+
+    Walked in sorted order, so the same tree produces the same snapshot on any
+    filesystem. A `kind: List` is unwrapped, as kubectl would.
+    """
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(directory)
+    for root, dirs, files in os.walk(directory):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith(MANIFEST_SUFFIXES):
+                continue
+            path = os.path.join(root, name)
+            with open(path) as fh:
+                try:
+                    documents = list(yaml.safe_load_all(fh))
+                except yaml.YAMLError as err:
+                    raise ManifestError(f"{path}: not YAML: {err}") from None
+            for document in documents:
+                if not isinstance(document, dict):
+                    continue  # an empty document between two `---`
+                if document.get("kind") == "List":
+                    for item in document.get("items") or []:
+                        if isinstance(item, dict):
+                            yield path, item
+                    continue
+                yield path, document
+
+
+def capture_manifests(directory):
+    """Snapshot a directory of manifests: the file-only twin of `capture`.
+
+    Keeps the RBAC kinds and ServiceAccounts and ignores everything else
+    without complaint, since a manifest tree is mostly Deployments. The result
+    goes through the same normalisers and the same ordering as a cluster
+    snapshot, so `diff` and `baseline` take it with no special case.
+
+    A namespaced object with no namespace is read as `default`, which is where
+    `kubectl apply` without `-n` puts it. An object defined twice is an error:
+    which one the cluster ends up with depends on apply order, and a gate that
+    guesses has judged a cluster nobody will run.
+    """
+    snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
+    by_kind = {kind: {} for _, kind, _, _ in SECTIONS}
+    for path, document in manifest_documents(directory):
+        kind = document.get("kind")
+        if kind not in by_kind:
+            continue
+        if _api_group(document.get("apiVersion")) != MANIFEST_GROUPS[kind]:
+            continue
+        meta = document.get("metadata")
+        if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
+            raise ManifestError(f"{path}: a {kind} with no metadata.name")
+        document = copy.deepcopy(document)
+        if kind in NAMESPACED_KINDS:
+            document["metadata"].setdefault("namespace", "default")
+        else:
+            # The API server drops a namespace on a cluster-scoped object.
+            document["metadata"].pop("namespace", None)
+        key = (document["metadata"].get("namespace", ""), meta["name"])
+        if key in by_kind[kind]:
+            first = by_kind[kind][key][0]
+            raise ManifestError(
+                f"{kind} {object_id({'namespace': key[0], 'name': key[1]})} "
+                f"is defined in both {first} and {path}"
+            )
+        by_kind[kind][key] = (path, document)
+    for key, kind, _resource, normalize in SECTIONS:
+        items = [normalize(document) for _path, document in by_kind[kind].values()]
         snap[key] = sorted(items, key=object_id)
     return snap
 
@@ -1424,7 +1522,27 @@ def write_out(path, text):
 
 
 def run_snapshot(args):
-    snap = capture(args.context)
+    if args.from_manifests is not None:
+        if args.context:
+            # Silently preferring one would be judging a source the caller
+            # did not mean.
+            log.error(
+                "--from-manifests reads files; --context reads a cluster. Pick one."
+            )
+            sys.exit(EXIT_USAGE)
+        try:
+            snap = capture_manifests(args.from_manifests)
+        except FileNotFoundError:
+            log.error("no such directory: %s", args.from_manifests)
+            sys.exit(EXIT_NOINPUT)
+        except OSError as err:
+            log.error("cannot read %s: %s", args.from_manifests, err)
+            sys.exit(EXIT_NOINPUT)
+        except ManifestError as err:
+            log.error("%s", err)
+            sys.exit(EXIT_DATAERR)
+    else:
+        snap = capture(args.context)
     write_out(args.output, dump_snapshot(snap))
     if args.output != "-":
         log.info("snapshot written to %s", args.output)
@@ -1574,6 +1692,12 @@ def build_parser():
         help="write here (default stdout)",
     )
     snap.add_argument("--context", metavar="NAME", help="kubeconfig context to read")
+    snap.add_argument(
+        "--from-manifests",
+        metavar="DIR",
+        help="read RBAC from the YAML files under DIR instead of a cluster; "
+        "needs no kubectl",
+    )
     snap.set_defaults(func=run_snapshot)
 
     def add_policy_flags(command, what):
