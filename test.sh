@@ -58,6 +58,15 @@ fi
 grep -q "cluster-admin-binding" /tmp/diff.txt
 grep -q "anonymous-subject" /tmp/diff.txt
 
+# A new binding to system:masters is its own blocking finding.
+run diff /fixtures/after.json /fixtures/masters.json >/tmp/masters.txt 2>&1 && rc=0 || rc=$?
+if [ "$rc" -ne 2 ]; then
+  echo "FAIL: a new binding to system:masters should exit 2, got $rc" >&2
+  cat /tmp/masters.txt >&2
+  exit 1
+fi
+grep -q "masters-subject" /tmp/masters.txt
+
 # The same diff scoped to one subject, as a matrix.
 run diff /fixtures/before.json /fixtures/after.json \
   --subject ServiceAccount/ci/deployer --no-policy | grep -q "NAMESPACE"
