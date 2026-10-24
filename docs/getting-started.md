@@ -296,6 +296,15 @@ namespace, so set `metadata.namespace` on anything that does not belong in
 `default`. An object defined twice is an error, since which copy wins depends
 on apply order. Render Helm charts or kustomize overlays to a directory first.
 
+An aggregated ClusterRole is given the rules the aggregation controller would
+give it: those of every other ClusterRole in the tree its
+`clusterRoleSelectors` match. That way a label that makes a role a
+contributor, or a widened selector, shows up as new grants on the aggregate,
+as it would in a cluster snapshot. The built-in `admin`, `edit` and `view` are
+never in the tree, so a role labelled `rbac.authorization.k8s.io/aggregate-to-*`
+with nothing in the tree selecting it is reported as a warning: what it adds to
+those roles cannot be judged from manifests.
+
 `unused-service-account` needs the cluster's pods, which no manifest supplies,
 so on this path it is reported under "Not checked" — never as passed.
 `--context` with `--from-manifests` is refused rather than one quietly winning.

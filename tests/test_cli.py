@@ -646,6 +646,98 @@ class FromManifestsTest(unittest.TestCase):
             code, _ = run(["snapshot", "--from-manifests", tmp])
         self.assertEqual(code, ra.EXIT_DATAERR)
 
+    AGGREGATED = (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+        "metadata: {{name: team-admin}}\n"
+        "aggregationRule:\n  clusterRoleSelectors:\n"
+        "  - matchLabels: {{acme.io/to-team-admin: 'true'}}\n"
+        "rules: []\n"
+        "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+        "metadata: {{name: anything{labels}}}\n"
+        "rules: [{{apiGroups: ['*'], resources: ['*'], verbs: ['*']}}]\n"
+        "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\n"
+        "metadata: {{name: devs}}\n"
+        "roleRef: {{apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: team-admin}}\n"
+        "subjects: [{{kind: Group, name: devs}}]\n"
+    )
+
+    def test_an_aggregated_role_holds_its_contributors_rules(self):
+        """What the aggregation controller would write, as a cluster snapshot
+        records it, and not the `rules: []` the manifest declares."""
+        labels = ", labels: {acme.io/to-team-admin: 'true'}"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "r.yaml").write_text(self.AGGREGATED.format(labels=labels))
+            code, text = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        roles = {r["name"]: r for r in json.loads(text)["clusterRoles"]}
+        self.assertEqual(roles["team-admin"]["rules"], roles["anything"]["rules"])
+
+    def test_a_label_that_joins_an_aggregate_fails_the_gate(self):
+        """The label alone hands `*` to everyone bound to the aggregate. Without
+        aggregation the diff read "No changes." and exited 0."""
+        labels = ", labels: {acme.io/to-team-admin: 'true'}"
+        with tempfile.TemporaryDirectory() as tmp:
+            snaps = []
+            for name, body in (
+                ("before", self.AGGREGATED.format(labels="")),
+                ("after", self.AGGREGATED.format(labels=labels)),
+            ):
+                tree = Path(tmp) / name
+                tree.mkdir()
+                (tree / "r.yaml").write_text(body)
+                snaps.append(str(Path(tmp) / f"{name}.json"))
+                run(["snapshot", "--from-manifests", str(tree), "-o", snaps[-1]])
+            code, out = run(["diff", *snaps])
+        self.assertEqual(code, ra.EXIT_VIOLATIONS)
+        self.assertIn("[wildcard] ClusterRole/team-admin", out)
+
+    def test_aggregation_reads_selectors_as_kubernetes_does(self):
+        """matchExpressions, and an aggregate that selects another one, as
+        admin selects edit."""
+        head = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+        tree = (
+            head + "metadata: {name: top}\naggregationRule:\n  clusterRoleSelectors:\n"
+            "  - matchExpressions: [{key: tier, operator: In, values: [mid]}]\n"
+            "---\n" + head + "metadata: {name: mid, labels: {tier: mid}}\n"
+            "aggregationRule:\n  clusterRoleSelectors:\n"
+            "  - matchExpressions:\n"
+            "    - {key: tier, operator: NotIn, values: [mid]}\n"
+            "    - {key: extra, operator: Exists}\n"
+            "    - {key: skip, operator: DoesNotExist}\n"
+            "---\n" + head + "metadata: {name: leaf, labels: {extra: 'y'}}\n"
+            "rules: [{apiGroups: [''], resources: [secrets], verbs: [get]}]\n"
+            "---\n"
+            + head
+            + "metadata: {name: skipped, labels: {extra: 'y', skip: 'y'}}\n"
+            "rules: [{apiGroups: [''], resources: [nodes], verbs: [delete]}]\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "r.yaml").write_text(tree)
+            code, text = self.snapshot(tmp)
+            self.assertEqual(code, ra.EXIT_OK)
+            roles = {r["name"]: r for r in json.loads(text)["clusterRoles"]}
+            leaf = roles["leaf"]["rules"]
+            self.assertEqual(roles["mid"]["rules"], leaf)
+            self.assertEqual(roles["top"]["rules"], leaf)
+            (Path(tmp) / "r.yaml").write_text(tree.replace("DoesNotExist", "Absent"))
+            code, _ = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_a_contributor_to_a_role_outside_the_tree_is_reported(self):
+        """admin, edit and view are never in a manifest tree, so what a role
+        labelled for them adds cannot be judged. It is said, not passed."""
+        role = (
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+            "metadata:\n  name: crd-admin\n  labels:\n"
+            "    rbac.authorization.k8s.io/aggregate-to-admin: 'true'\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "r.yaml").write_text(role)
+            with self.assertLogs(ra.log, "WARNING") as logs:
+                code, _ = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertIn("ClusterRole/crd-admin", logs.output[0])
+
     def test_the_pull_request_gate(self):
         """Snapshot the PR's manifests, diff against the committed baseline,
         gate on the exit code — with the pod-dependent rule reported as not

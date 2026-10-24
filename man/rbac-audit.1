@@ -85,7 +85,8 @@ and
 under
 .I DIR
 instead of a cluster. Objects of other kinds are ignored; one defined twice is
-a data error.
+a data error. An aggregated ClusterRole gets the rules of the ClusterRoles in
+the tree its selectors match, as the aggregation controller would give it.
 .TP
 .BI \-\-policy " PATH"
 The policy file. Defaults to
