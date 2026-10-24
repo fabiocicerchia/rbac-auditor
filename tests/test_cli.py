@@ -12,6 +12,7 @@ takes, and it has to be exercised the same way.
 import io
 import json
 import logging
+import os
 import sys
 import tempfile
 import unittest
@@ -555,6 +556,47 @@ class FromManifestsTest(unittest.TestCase):
             (Path(tmp) / "x.json").write_text("{not json")
             code, _ = run(["snapshot", "--from-manifests", tmp])
         self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_malformed_identity_fields_are_data_errors(self):
+        """A field of the wrong type is a message, not a traceback, and an
+        empty name would write a snapshot that `diff` then refuses."""
+        role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\n"
+        for body in (
+            "apiVersion: v1\nkind: [Role]\nmetadata: {name: x}\n",
+            "apiVersion: 1\nkind: Role\nmetadata: {name: x}\n",
+            role + "metadata: {name: ''}\n",
+            role + "metadata: {name: x, namespace: 7}\n",
+            '{"kind": "Role", "a": ' + "[" * 100000 + "]" * 100000 + "}",
+        ):
+            with self.subTest(body=body[:60]), tempfile.TemporaryDirectory() as tmp:
+                suffix = "json" if body.startswith("{") else "yaml"
+                (Path(tmp) / f"x.{suffix}").write_text(body)
+                code, _ = run(["snapshot", "--from-manifests", tmp])
+                self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_an_empty_or_null_namespace_is_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sa.yaml").write_text(
+                "apiVersion: v1\nkind: ServiceAccount\nmetadata: {name: a, namespace: ''}\n"
+                "---\napiVersion: v1\nkind: ServiceAccount\nmetadata: {name: b, namespace: null}\n"
+            )
+            code, snap = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        sas = json.loads(snap)["serviceAccounts"]
+        self.assertEqual({sa["namespace"] for sa in sas}, {"default"})
+
+    def test_a_directory_that_cannot_be_listed_is_no_input(self):
+        """os.walk skips what it cannot list; the snapshot must not."""
+        real = os.scandir
+
+        def scandir(path="."):
+            if os.path.basename(os.fspath(path)) == "rbac":
+                raise PermissionError(13, "Permission denied", path)
+            return real(path)
+
+        with mock.patch("os.scandir", side_effect=scandir):
+            code, _ = run(["snapshot", "--from-manifests", MANIFESTS])
+        self.assertEqual(code, ra.EXIT_NOINPUT)
 
     def test_a_kind_list_is_unwrapped(self):
         lst = (

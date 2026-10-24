@@ -285,13 +285,16 @@ the directory instead of a cluster — no kubectl, no credentials:
     rbac-audit diff rbac/prod.json /tmp/proposed.json
 ```
 
-It walks every `*.yaml`, `*.yml` and `*.json` under the directory — the files
-`kubectl apply -f` reads — multi-document files included, and keeps the RBAC
-kinds and ServiceAccounts; everything else is ignored. The result is the same format as a cluster snapshot, so `diff` and
+It walks every `*.yaml`, `*.yml` and `*.json` under the directory and its
+subdirectories — the files `kubectl apply -R -f` reads — multi-document files
+included, and keeps the RBAC kinds and ServiceAccounts; everything else is
+ignored. The result is the same format as a cluster snapshot, so `diff` and
 `baseline` take it as they take any other file. A namespaced object with no
-`metadata.namespace` is read as `default`, as `kubectl apply` without `-n`
-would; an object defined twice is an error, since which copy wins depends on
-apply order. Render Helm charts or kustomize overlays to a directory first.
+`metadata.namespace` is read as `default`. That is this tool's fallback, not
+necessarily yours: `kubectl apply` without `-n` uses your kubeconfig context's
+namespace, so set `metadata.namespace` on anything that does not belong in
+`default`. An object defined twice is an error, since which copy wins depends
+on apply order. Render Helm charts or kustomize overlays to a directory first.
 
 `unused-service-account` needs the cluster's pods, which no manifest supplies,
 so on this path it is reported under "Not checked" — never as passed.

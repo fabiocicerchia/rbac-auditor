@@ -269,18 +269,23 @@ def _json_documents(text):
 
 
 def _read_documents(path):
-    """Every document in one manifest file, or ManifestError if it will not parse."""
+    """Every document in one manifest file; ManifestError if it will not parse."""
     with open(path, encoding="utf-8") as fh:
         try:
             if path.endswith(".json"):
                 # JSON is not quite a YAML subset: PyYAML refuses the tab
                 # indentation many JSON writers emit.
-                return list(_json_documents(fh.read()))
-            return list(yaml.safe_load_all(fh))
+                yield from _json_documents(fh.read())
+            else:
+                # Streamed: a generated file of mostly non-RBAC documents
+                # should not be held in memory to keep a handful of them.
+                yield from yaml.safe_load_all(fh)
         except json.JSONDecodeError as err:
             raise ManifestError(f"{path}: not JSON: {err}") from None
         except (yaml.YAMLError, UnicodeDecodeError) as err:
             raise ManifestError(f"{path}: not YAML: {err}") from None
+        except RecursionError:
+            raise ManifestError(f"{path}: nested too deeply to read") from None
 
 
 def manifest_documents(directory):
@@ -291,7 +296,13 @@ def manifest_documents(directory):
     """
     if not os.path.isdir(directory):
         raise FileNotFoundError(directory)
-    for root, dirs, files in os.walk(directory):
+
+    def unreadable(err):
+        # os.walk skips a directory it cannot list unless told otherwise, and a
+        # snapshot missing that directory's bindings reads as them not existing.
+        raise err
+
+    for root, dirs, files in os.walk(directory, onerror=unreadable):
         dirs.sort()
         for name in sorted(files):
             if not name.endswith(MANIFEST_SUFFIXES):
@@ -316,8 +327,9 @@ def capture_manifests(directory):
     goes through the same normalisers and the same ordering as a cluster
     snapshot, so `diff` and `baseline` take it with no special case.
 
-    A namespaced object with no namespace is read as `default`, which is where
-    `kubectl apply` without `-n` puts it. An object defined twice is an error:
+    A namespaced object with no namespace is read as `default`: a manifest
+    tree has no kubeconfig context to supply one, and `default` is where the
+    API server puts it when nothing does. An object defined twice is an error:
     which one the cluster ends up with depends on apply order, and a gate that
     guesses has judged a cluster nobody will run.
     """
@@ -325,17 +337,33 @@ def capture_manifests(directory):
     by_kind = {kind: {} for _, kind, _, _ in SECTIONS}
     for path, document in manifest_documents(directory):
         kind = document.get("kind")
+        if kind is not None and not isinstance(kind, str):
+            # Fail closed: a gate cannot tell what a kind of [Role] would be.
+            raise ManifestError(f"{path}: a kind that is not a string")
         if kind not in by_kind:
             continue
-        if _api_group(document.get("apiVersion")) != MANIFEST_GROUPS[kind]:
+        api_version = document.get("apiVersion")
+        if api_version is not None and not isinstance(api_version, str):
+            raise ManifestError(f"{path}: a {kind} whose apiVersion is not a string")
+        if _api_group(api_version) != MANIFEST_GROUPS[kind]:
             continue
         meta = document.get("metadata")
-        if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
+        if (
+            not isinstance(meta, dict)
+            or not isinstance(meta.get("name"), str)
+            or not meta["name"]
+        ):
             raise ManifestError(f"{path}: a {kind} with no metadata.name")
         document = copy.deepcopy(document)
         meta = document["metadata"]
         if kind in NAMESPACED_KINDS:
-            meta.setdefault("namespace", "default")
+            namespace = meta.get("namespace")
+            if namespace is not None and not isinstance(namespace, str):
+                raise ManifestError(
+                    f"{path}: {kind} {meta['name']} has a namespace that is not a string"
+                )
+            # Empty and null mean unset to the API server, as absent does.
+            meta["namespace"] = namespace or "default"
         else:
             # The API server drops a namespace on a cluster-scoped object.
             meta.pop("namespace", None)
