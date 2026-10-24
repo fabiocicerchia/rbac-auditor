@@ -409,6 +409,64 @@ def _selector_matches(path, selector, labels):
     return True
 
 
+def _aggregation_selectors(roles):
+    """{aggregate name: its clusterRoleSelectors} for the roles that have one."""
+    selectors = {}
+    for name, (path, document) in roles.items():
+        rule = document.get("aggregationRule")
+        if not rule:
+            continue
+        chosen = rule.get("clusterRoleSelectors") if isinstance(rule, dict) else None
+        if not isinstance(chosen, list):
+            raise ManifestError(
+                f"{path}: aggregationRule has no clusterRoleSelectors list"
+            )
+        selectors[name] = chosen
+    return selectors
+
+
+def _fill_aggregates(roles, members):
+    """Set each aggregate's rules to its members' rules, until they settle.
+
+    One aggregate can select another, as admin selects edit. Each pass after
+    the first only adds rules, so a chain as long as the number of aggregates
+    settles within that many passes.
+    """
+    for _ in range(len(members) + 1):
+        changed = False
+        for name in sorted(members):
+            rules = [
+                r for other in members[name] for r in roles[other][1].get("rules") or []
+            ]
+            document = roles[name][1]
+            if normalize_rules(rules) != normalize_rules(document.get("rules")):
+                document["rules"] = rules
+                changed = True
+        if not changed:
+            return
+
+
+def _warn_unselected_contributors(labels, contributors):
+    """Say so when a role feeds an aggregate this tree does not hold.
+
+    Its rules reach whoever is bound to that role, and nothing in this
+    snapshot can show it; a warning is the one thing better than passing it
+    silently.
+    """
+    for name in sorted(labels):
+        if name in contributors:
+            continue
+        for key in sorted(labels[name]):
+            if key.startswith(AGGREGATE_LABEL_PREFIX):
+                log.warning(
+                    "ClusterRole/%s is labelled %s, but no ClusterRole in this "
+                    "tree selects it: its rules also reach a role this snapshot "
+                    "does not hold, and the gate cannot judge that",
+                    name,
+                    key,
+                )
+
+
 def _aggregate(cluster_roles):
     """Give each aggregated ClusterRole the rules the controller would.
 
@@ -425,17 +483,6 @@ def _aggregate(cluster_roles):
         for path, document in cluster_roles
     }
     labels = {name: _labels(path, document) for name, (path, document) in roles.items()}
-    selectors = {}
-    for name, (path, document) in roles.items():
-        rule = document.get("aggregationRule")
-        if not rule:
-            continue
-        chosen = rule.get("clusterRoleSelectors") if isinstance(rule, dict) else None
-        if not isinstance(chosen, list):
-            raise ManifestError(
-                f"{path}: aggregationRule has no clusterRoleSelectors list"
-            )
-        selectors[name] = chosen
     members = {
         name: sorted(
             other
@@ -443,38 +490,12 @@ def _aggregate(cluster_roles):
             if other != name
             and any(_selector_matches(roles[name][0], s, labels[other]) for s in chosen)
         )
-        for name, chosen in selectors.items()
+        for name, chosen in _aggregation_selectors(roles).items()
     }
-    # One aggregate can select another, as admin selects edit, so repeat until
-    # nothing changes. Each pass after the first only adds rules, so a chain
-    # as long as the number of aggregates settles within that many passes.
-    for _ in range(len(members) + 1):
-        changed = False
-        for name in sorted(members):
-            rules = [
-                r for other in members[name] for r in roles[other][1].get("rules") or []
-            ]
-            document = roles[name][1]
-            if normalize_rules(rules) != normalize_rules(document.get("rules")):
-                document["rules"] = rules
-                changed = True
-        if not changed:
-            break
-    contributors = {other for names in members.values() for other in names}
-    for name in sorted(roles):
-        if name in contributors:
-            continue
-        for key in sorted(labels[name]):
-            if key.startswith(AGGREGATE_LABEL_PREFIX):
-                # Said, not silently passed: its rules reach whoever is bound
-                # to that role, and nothing in this snapshot can show it.
-                log.warning(
-                    "ClusterRole/%s is labelled %s, but no ClusterRole in this "
-                    "tree selects it: its rules also reach a role this snapshot "
-                    "does not hold, and the gate cannot judge that",
-                    name,
-                    key,
-                )
+    _fill_aggregates(roles, members)
+    _warn_unselected_contributors(
+        labels, {other for names in members.values() for other in names}
+    )
 
 
 def capture_manifests(directory):
