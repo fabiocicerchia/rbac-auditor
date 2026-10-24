@@ -566,13 +566,21 @@ class FromManifestsTest(unittest.TestCase):
             "apiVersion: 1\nkind: Role\nmetadata: {name: x}\n",
             role + "metadata: {name: ''}\n",
             role + "metadata: {name: x, namespace: 7}\n",
-            '{"kind": "Role", "a": ' + "[" * 100000 + "]" * 100000 + "}",
         ):
             with self.subTest(body=body[:60]), tempfile.TemporaryDirectory() as tmp:
                 suffix = "json" if body.startswith("{") else "yaml"
                 (Path(tmp) / f"x.{suffix}").write_text(body)
                 code, _ = run(["snapshot", "--from-manifests", tmp])
                 self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_json_nested_past_the_recursion_limit_is_a_data_error(self):
+        """Whether the decoder recurses depends on the Python build, so the
+        limit is simulated rather than reached."""
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "x.json").write_text('{"kind": "Role"}')
+            with mock.patch("rbac_audit._json_documents", side_effect=RecursionError):
+                code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
 
     def test_an_empty_or_null_namespace_is_default(self):
         with tempfile.TemporaryDirectory() as tmp:
