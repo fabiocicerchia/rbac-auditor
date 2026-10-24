@@ -4,6 +4,9 @@
 Commands:
   snapshot            deterministic JSON of Roles, ClusterRoles, bindings and
                       ServiceAccounts, meant to be committed to a repository
+  snapshot --from-manifests DIR
+                      the same snapshot read from YAML files instead of a
+                      cluster, so the gate can run on a pull request
   baseline [SNAP]     apply the policy to a whole cluster rather than to what
                       changed in it — the day-one audit, before there is
                       anything to diff against
@@ -24,6 +27,7 @@ import argparse
 import copy
 import json
 import logging
+import os
 import subprocess
 import sys
 
@@ -225,6 +229,314 @@ def capture(context=None):
     snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
     for key, _kind, resource, normalize in SECTIONS:
         items = [normalize(obj) for obj in kubectl_json(resource, context)]
+        snap[key] = sorted(items, key=object_id)
+    return snap
+
+
+# What a manifest's apiVersion has to say for each kind the snapshot carries.
+# A ServiceAccount is core/v1; everything else is the RBAC group, at any
+# version — v1beta1 manifests still exist in old repositories, and refusing
+# them would read as those grants not existing.
+MANIFEST_GROUPS = {kind: "rbac.authorization.k8s.io" for _, kind, _, _ in SECTIONS}
+MANIFEST_GROUPS["ServiceAccount"] = ""
+# The extensions `kubectl apply -f DIR` reads. Skipping one it applies would
+# let a pull request bind cluster-admin in a file the gate never opened.
+MANIFEST_SUFFIXES = (".yaml", ".yml", ".json")
+NAMESPACED_KINDS = {"Role", "RoleBinding", "ServiceAccount"}
+# The label key prefix Kubernetes' own aggregated roles (admin, edit, view)
+# select on. They are never in a manifest tree, so a role carrying one grants
+# through a role the snapshot does not hold.
+AGGREGATE_LABEL_PREFIX = "rbac.authorization.k8s.io/aggregate-to-"
+
+
+class ManifestError(Exception):
+    """A manifest directory that cannot be turned into a snapshot."""
+
+
+def _api_group(api_version):
+    """`rbac.authorization.k8s.io/v1` -> `rbac.authorization.k8s.io`; `v1` -> ``."""
+    group, _, _version = (api_version or "").rpartition("/")
+    return group
+
+
+def _json_documents(text):
+    """Every JSON value in `text`: kubectl reads a .json file as a stream."""
+    decoder = json.JSONDecoder()
+    pos = 0
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos == len(text):
+            return
+        document, pos = decoder.raw_decode(text, pos)
+        yield document
+
+
+def _read_documents(path):
+    """Every document in one manifest file; ManifestError if it will not parse."""
+    with open(path, encoding="utf-8") as fh:
+        try:
+            if path.endswith(".json"):
+                # JSON is not quite a YAML subset: PyYAML refuses the tab
+                # indentation many JSON writers emit.
+                yield from _json_documents(fh.read())
+            else:
+                # Streamed: a generated file of mostly non-RBAC documents
+                # should not be held in memory to keep a handful of them.
+                yield from yaml.safe_load_all(fh)
+        except json.JSONDecodeError as err:
+            raise ManifestError(f"{path}: not JSON: {err}") from None
+        except (yaml.YAMLError, UnicodeDecodeError) as err:
+            raise ManifestError(f"{path}: not YAML: {err}") from None
+        except RecursionError:
+            raise ManifestError(f"{path}: nested too deeply to read") from None
+
+
+def manifest_documents(directory):
+    """(path, document) for every YAML or JSON document under `directory`.
+
+    Walked in sorted order, so the same tree produces the same snapshot on any
+    filesystem. A `kind: List` is unwrapped, as kubectl would.
+    """
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(directory)
+
+    def unreadable(err):
+        # os.walk skips a directory it cannot list unless told otherwise, and a
+        # snapshot missing that directory's bindings reads as them not existing.
+        raise err
+
+    for root, dirs, files in os.walk(directory, onerror=unreadable):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith(MANIFEST_SUFFIXES):
+                continue
+            path = os.path.join(root, name)
+            for document in _read_documents(path):
+                if not isinstance(document, dict):
+                    continue  # an empty document between two `---`
+                if document.get("kind") == "List":
+                    for item in document.get("items") or []:
+                        if isinstance(item, dict):
+                            yield path, item
+                    continue
+                yield path, document
+
+
+def _snapshot_kind(path, document):
+    """The snapshot kind this manifest document is, or None to skip it.
+
+    Fails closed on a kind or apiVersion that is not a string: a gate cannot
+    tell what a kind of [Role] would be.
+    """
+    kind = document.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        raise ManifestError(f"{path}: a kind that is not a string")
+    if kind not in MANIFEST_GROUPS:
+        return None
+    api_version = document.get("apiVersion")
+    if api_version is not None and not isinstance(api_version, str):
+        raise ManifestError(f"{path}: a {kind} whose apiVersion is not a string")
+    return kind if _api_group(api_version) == MANIFEST_GROUPS[kind] else None
+
+
+def _as_applied(path, kind, document):
+    """A copy of `document` with the metadata the API server would store."""
+    meta = document.get("metadata")
+    if (
+        not isinstance(meta, dict)
+        or not isinstance(meta.get("name"), str)
+        or not meta["name"]
+    ):
+        raise ManifestError(f"{path}: a {kind} with no metadata.name")
+    document = copy.deepcopy(document)
+    meta = document["metadata"]
+    if kind in NAMESPACED_KINDS:
+        namespace = meta.get("namespace")
+        if namespace is not None and not isinstance(namespace, str):
+            raise ManifestError(
+                f"{path}: {kind} {meta['name']} has a namespace that is not a string"
+            )
+        # Empty and null mean unset to the API server, as absent does.
+        meta["namespace"] = namespace or "default"
+    else:
+        # The API server drops a namespace on a cluster-scoped object.
+        meta.pop("namespace", None)
+    return document
+
+
+def _labels(path, document):
+    labels = document["metadata"].get("labels") or {}
+    if not isinstance(labels, dict):
+        raise ManifestError(f"{path}: metadata.labels is not a mapping")
+    return labels
+
+
+# A label selector's matchExpressions operators. NotIn matches a role without
+# the key at all, as Kubernetes reads it.
+_SELECTOR_OPERATORS = {
+    "In": lambda key, values, labels: key in labels and labels[key] in values,
+    "NotIn": lambda key, values, labels: key not in labels or labels[key] not in values,
+    "Exists": lambda key, values, labels: key in labels,
+    "DoesNotExist": lambda key, values, labels: key not in labels,
+}
+
+
+def _selector_matches(path, selector, labels):
+    """Whether one clusterRoleSelector matches `labels`, as the API server reads it.
+
+    An unknown operator fails closed: the API server would refuse the role,
+    and a gate that guesses what it selects has judged a cluster nobody runs.
+    """
+    if not isinstance(selector, dict):
+        raise ManifestError(f"{path}: a clusterRoleSelector that is not a mapping")
+    match_labels = selector.get("matchLabels") or {}
+    expressions = selector.get("matchExpressions") or []
+    if not isinstance(match_labels, dict) or not isinstance(expressions, list):
+        raise ManifestError(f"{path}: a malformed clusterRoleSelector")
+    if any(labels.get(key) != value for key, value in match_labels.items()):
+        return False
+    for expression in expressions:
+        if not isinstance(expression, dict):
+            raise ManifestError(f"{path}: a malformed clusterRoleSelector")
+        test = _SELECTOR_OPERATORS.get(expression.get("operator"))
+        if test is None:
+            raise ManifestError(
+                f"{path}: unknown selector operator {expression.get('operator')!r}"
+            )
+        if not test(expression.get("key"), expression.get("values") or [], labels):
+            return False
+    return True
+
+
+def _aggregation_selectors(roles):
+    """{aggregate name: its clusterRoleSelectors} for the roles that have one."""
+    selectors = {}
+    for name, (path, document) in roles.items():
+        rule = document.get("aggregationRule")
+        if not rule:
+            continue
+        listed = rule.get("clusterRoleSelectors") if isinstance(rule, dict) else None
+        if not isinstance(listed, list):
+            raise ManifestError(
+                f"{path}: aggregationRule has no clusterRoleSelectors list"
+            )
+        selectors[name] = listed
+    return selectors
+
+
+def _selected_roles(path, aggregate, selectors, labels):
+    """The other ClusterRoles any of `aggregate`'s selectors match, sorted."""
+    return sorted(
+        other
+        for other, other_labels in labels.items()
+        if other != aggregate
+        and any(_selector_matches(path, s, other_labels) for s in selectors)
+    )
+
+
+def _fill_aggregates(roles, members):
+    """Set each aggregate's rules to its members' rules, until they settle.
+
+    One aggregate can select another, as admin selects edit. Each pass after
+    the first only adds rules, so a chain as long as the number of aggregates
+    settles within that many passes.
+    """
+    for _ in range(len(members) + 1):
+        changed = False
+        for name in sorted(members):
+            rules = [
+                r for other in members[name] for r in roles[other][1].get("rules") or []
+            ]
+            document = roles[name][1]
+            if normalize_rules(rules) != normalize_rules(document.get("rules")):
+                document["rules"] = rules
+                changed = True
+        if not changed:
+            return
+
+
+def _warn_unselected_contributors(labels, contributors):
+    """Say so when a role feeds an aggregate this tree does not hold.
+
+    Its rules reach whoever is bound to that role, and nothing in this
+    snapshot can show it; a warning is the one thing better than passing it
+    silently.
+    """
+    for name in sorted(labels):
+        if name in contributors:
+            continue
+        for key in sorted(labels[name]):
+            if key.startswith(AGGREGATE_LABEL_PREFIX):
+                log.warning(
+                    "ClusterRole/%s is labelled %s, but no ClusterRole in this "
+                    "tree selects it: its rules also reach a role this snapshot "
+                    "does not hold, and the gate cannot judge that",
+                    name,
+                    key,
+                )
+
+
+def _aggregate(cluster_roles):
+    """Give each aggregated ClusterRole the rules the controller would.
+
+    In a cluster, the aggregation controller replaces an aggregated role's
+    rules with those of every other ClusterRole its selectors match, and that
+    is what a cluster snapshot records. A manifest declares only the selector,
+    so without this a label that makes a role a contributor, or a widened
+    selector, hands its rules to everyone bound to the aggregate while the
+    diff shows no new grant. `cluster_roles` is the (path, document) pairs
+    `capture_manifests` collected; the documents are its copies, changed here.
+    """
+    roles = {
+        document["metadata"]["name"]: (path, document)
+        for path, document in cluster_roles
+    }
+    labels = {name: _labels(path, document) for name, (path, document) in roles.items()}
+    members = {
+        name: _selected_roles(roles[name][0], name, selectors, labels)
+        for name, selectors in _aggregation_selectors(roles).items()
+    }
+    _fill_aggregates(roles, members)
+    _warn_unselected_contributors(
+        labels, {other for names in members.values() for other in names}
+    )
+
+
+def capture_manifests(directory):
+    """Snapshot a directory of manifests: the file-only twin of `capture`.
+
+    Keeps the RBAC kinds and ServiceAccounts and ignores everything else
+    without complaint, since a manifest tree is mostly Deployments. The result
+    goes through the same normalisers and the same ordering as a cluster
+    snapshot, so `diff` and `baseline` take it with no special case.
+
+    A namespaced object with no namespace is read as `default`: a manifest
+    tree has no kubeconfig context to supply one, and `default` is where the
+    API server puts it when nothing does. An object defined twice is an error:
+    which one the cluster ends up with depends on apply order, and a gate that
+    guesses has judged a cluster nobody will run. An aggregated ClusterRole
+    gets the rules the aggregation controller would give it (`_aggregate`).
+    """
+    snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
+    by_kind = {kind: {} for _, kind, _, _ in SECTIONS}
+    for path, document in manifest_documents(directory):
+        kind = _snapshot_kind(path, document)
+        if kind is None:
+            continue
+        document = _as_applied(path, kind, document)
+        meta = document["metadata"]
+        key = (meta.get("namespace", ""), meta["name"])
+        if key in by_kind[kind]:
+            first = by_kind[kind][key][0]
+            raise ManifestError(
+                f"{kind} {object_id({'namespace': key[0], 'name': key[1]})} "
+                f"is defined in both {first} and {path}"
+            )
+        by_kind[kind][key] = (path, document)
+    _aggregate(by_kind["ClusterRole"].values())
+    for key, kind, _resource, normalize in SECTIONS:
+        items = [normalize(document) for _path, document in by_kind[kind].values()]
         snap[key] = sorted(items, key=object_id)
     return snap
 
@@ -1424,7 +1736,27 @@ def write_out(path, text):
 
 
 def run_snapshot(args):
-    snap = capture(args.context)
+    if args.from_manifests is not None:
+        if args.context:
+            # Silently preferring one would be judging a source the caller
+            # did not mean.
+            log.error(
+                "--from-manifests reads files; --context reads a cluster. Pick one."
+            )
+            sys.exit(EXIT_USAGE)
+        try:
+            snap = capture_manifests(args.from_manifests)
+        except FileNotFoundError:
+            log.error("no such directory: %s", args.from_manifests)
+            sys.exit(EXIT_NOINPUT)
+        except OSError as err:
+            log.error("cannot read %s: %s", args.from_manifests, err)
+            sys.exit(EXIT_NOINPUT)
+        except ManifestError as err:
+            log.error("%s", err)
+            sys.exit(EXIT_DATAERR)
+    else:
+        snap = capture(args.context)
     write_out(args.output, dump_snapshot(snap))
     if args.output != "-":
         log.info("snapshot written to %s", args.output)
@@ -1574,6 +1906,12 @@ def build_parser():
         help="write here (default stdout)",
     )
     snap.add_argument("--context", metavar="NAME", help="kubeconfig context to read")
+    snap.add_argument(
+        "--from-manifests",
+        metavar="DIR",
+        help="read RBAC from the YAML files under DIR instead of a cluster; "
+        "needs no kubectl",
+    )
     snap.set_defaults(func=run_snapshot)
 
     def add_policy_flags(command, what):

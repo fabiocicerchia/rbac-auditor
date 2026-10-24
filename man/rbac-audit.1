@@ -35,7 +35,14 @@ declares
 .BR kind:\ RbacSnapshot ,
 which is what distinguishes it from the
 .B \-\-json
-diff report.
+diff report. With
+.BI \-\-from\-manifests " DIR"
+it reads the RBAC kinds and ServiceAccounts from the YAML and JSON files under
+.I DIR
+instead of a cluster, needs no
+.BR kubectl ,
+and writes the same format \(em so a pull request can be gated before
+anything is applied.
 .TP
 .BI baseline " " [ SNAPSHOT ]
 Apply the policy to a whole cluster rather than to what changed in it, by
@@ -64,7 +71,22 @@ writes.
 is standard output, which is the default.
 .TP
 .BI \-\-context " NAME"
-The kubeconfig context to read. Only meaningful when a cluster is consulted.
+The kubeconfig context to read. Only meaningful when a cluster is consulted,
+and refused alongside
+.BR \-\-from\-manifests .
+.TP
+.BI \-\-from\-manifests " DIR"
+.B snapshot
+only: read every
+.IR *.yaml ,
+.I *.yml
+and
+.I *.json
+under
+.I DIR
+instead of a cluster. Objects of other kinds are ignored; one defined twice is
+a data error. An aggregated ClusterRole gets the rules of the ClusterRoles in
+the tree its selectors match, as the aggregation controller would give it.
 .TP
 .BI \-\-policy " PATH"
 The policy file. Defaults to

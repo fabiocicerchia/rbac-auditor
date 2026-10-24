@@ -272,6 +272,43 @@ the flag to start with: read a week of them, then take it off.
   run: rbac-audit diff rbac/prod.json rbac/current.json
 ```
 
+### On the pull request that changes the RBAC
+
+Where the RBAC lives as YAML in the repository, the gate can judge the change
+before it is merged rather than after it is applied. `--from-manifests` reads
+the directory instead of a cluster — no kubectl, no credentials:
+
+```yaml
+- name: RBAC gate
+  run: |
+    rbac-audit snapshot --from-manifests deploy/ -o /tmp/proposed.json
+    rbac-audit diff rbac/prod.json /tmp/proposed.json
+```
+
+It walks every `*.yaml`, `*.yml` and `*.json` under the directory and its
+subdirectories — the files `kubectl apply -R -f` reads — multi-document files
+included, and keeps the RBAC kinds and ServiceAccounts; everything else is
+ignored. The result is the same format as a cluster snapshot, so `diff` and
+`baseline` take it as they take any other file. A namespaced object with no
+`metadata.namespace` is read as `default`. That is this tool's fallback, not
+necessarily yours: `kubectl apply` without `-n` uses your kubeconfig context's
+namespace, so set `metadata.namespace` on anything that does not belong in
+`default`. An object defined twice is an error, since which copy wins depends
+on apply order. Render Helm charts or kustomize overlays to a directory first.
+
+An aggregated ClusterRole is given the rules the aggregation controller would
+give it: those of every other ClusterRole in the tree its
+`clusterRoleSelectors` match. That way a label that makes a role a
+contributor, or a widened selector, shows up as new grants on the aggregate,
+as it would in a cluster snapshot. The built-in `admin`, `edit` and `view` are
+never in the tree, so a role labelled `rbac.authorization.k8s.io/aggregate-to-*`
+with nothing in the tree selecting it is reported as a warning: what it adds to
+those roles cannot be judged from manifests.
+
+`unused-service-account` needs the cluster's pods, which no manifest supplies,
+so on this path it is reported under "Not checked" — never as passed.
+`--context` with `--from-manifests` is refused rather than one quietly winning.
+
 Exit code 2 fails the step. Start with `--no-policy` for a week, read what it
 would have blocked, then take the flag off — a check that has been red since
 the day it was added is a check that has been switched off.

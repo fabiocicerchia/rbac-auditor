@@ -12,6 +12,7 @@ takes, and it has to be exercised the same way.
 import io
 import json
 import logging
+import os
 import sys
 import tempfile
 import unittest
@@ -443,6 +444,313 @@ class SubjectCommandTest(unittest.TestCase):
         code, out = run(["diff", BEFORE, AFTER, "--subject", "User/nobody"])
         self.assertEqual(code, ra.EXIT_OK)
         self.assertIn("no permissions", out.lower())
+
+
+MANIFESTS = str(FIXTURES / "manifests")
+
+
+class FromManifestsTest(unittest.TestCase):
+    """`snapshot --from-manifests` is what lets the gate run on a pull request:
+    snapshot the proposed YAML, diff it against the committed baseline."""
+
+    def snapshot(self, directory=MANIFESTS):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snap.json"
+            code, _ = run(["snapshot", "--from-manifests", directory, "-o", str(path)])
+            return code, (path.read_text() if path.exists() else None)
+
+    def test_it_keeps_rbac_and_service_accounts_and_nothing_else(self):
+        code, text = self.snapshot()
+        self.assertEqual(code, ra.EXIT_OK)
+        snap = json.loads(text)
+        self.assertEqual(snap["apiVersion"], ra.SNAPSHOT_VERSION)
+        self.assertEqual(snap["kind"], ra.SNAPSHOT_KIND)
+        # Both documents of the multi-document file, and the .yml file.
+        self.assertEqual([ra.object_id(r) for r in snap["roles"]], ["ci/deployer"])
+        self.assertEqual(
+            [ra.object_id(b) for b in snap["roleBindings"]], ["ci/deployer"]
+        )
+        self.assertEqual(
+            [b["name"] for b in snap["clusterRoleBindings"]], ["platform-admins"]
+        )
+        # The ConfigMap and the non-RBAC `Role` are gone without complaint.
+        self.assertEqual(snap["clusterRoles"], [])
+        self.assertEqual(
+            [ra.object_id(sa) for sa in snap["serviceAccounts"]],
+            ["ci/deployer", "default/builder"],
+        )
+        # A subject's namespace is resolved from its binding, as for a cluster.
+        self.assertEqual(
+            snap["roleBindings"][0]["subjects"],
+            [{"kind": "ServiceAccount", "name": "deployer", "namespace": "ci"}],
+        )
+
+    def test_it_is_the_committed_format_and_reloads_as_a_snapshot(self):
+        _, text = self.snapshot()
+        self.assertEqual(text, ra.dump_snapshot(json.loads(text)))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snap.json"
+            path.write_text(text)
+            ra.load_snapshot(str(path))  # exits on a snapshot it cannot read
+
+    def test_the_same_tree_gives_the_same_bytes(self):
+        self.assertEqual(self.snapshot()[1], self.snapshot()[1])
+
+    def test_kubectl_is_never_called(self):
+        with mock.patch("rbac_audit.kubectl_json") as kubectl:
+            code, _ = self.snapshot()
+        self.assertEqual(code, ra.EXIT_OK)
+        kubectl.assert_not_called()
+
+    def test_context_and_from_manifests_together_are_refused(self):
+        code, _ = run(["snapshot", "--from-manifests", MANIFESTS, "--context", "prod"])
+        self.assertEqual(code, ra.EXIT_USAGE)
+
+    def test_a_missing_directory_is_no_input(self):
+        code, _ = run(["snapshot", "--from-manifests", str(FIXTURES / "nope")])
+        self.assertEqual(code, ra.EXIT_NOINPUT)
+
+    def test_broken_yaml_is_a_data_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bad.yaml").write_text("kind: Role\n  : [unclosed\n")
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_a_file_that_is_not_text_is_a_data_error(self):
+        """A binary file with a .yaml name is a message, not a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bad.yaml").write_bytes(b"\xff\xfe\x00k")
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_a_json_manifest_is_read_like_kubectl_reads_it(self):
+        """`kubectl apply -f DIR` applies .json files too, so a binding there
+        must reach the gate rather than pass unseen."""
+        binding = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRoleBinding",
+            "metadata": {"name": "sneaky"},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "cluster-admin",
+            },
+            "subjects": [{"kind": "User", "name": "mallory"}],
+        }
+        role = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": {"name": "streamed"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            # Tab-indented, which PyYAML would refuse, and two values in a row.
+            text = json.dumps(binding, indent="\t") + "\n" + json.dumps(role)
+            (Path(tmp) / "x.json").write_text(text)
+            code, snap = self.snapshot(tmp)
+            self.assertEqual(code, ra.EXIT_OK)
+            snap = json.loads(snap)
+            self.assertEqual(
+                [b["name"] for b in snap["clusterRoleBindings"]], ["sneaky"]
+            )
+            self.assertEqual([r["name"] for r in snap["clusterRoles"]], ["streamed"])
+            (Path(tmp) / "x.json").write_text("{not json")
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_malformed_identity_fields_are_data_errors(self):
+        """A field of the wrong type is a message, not a traceback, and an
+        empty name would write a snapshot that `diff` then refuses."""
+        role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\n"
+        for body in (
+            "apiVersion: v1\nkind: [Role]\nmetadata: {name: x}\n",
+            "apiVersion: 1\nkind: Role\nmetadata: {name: x}\n",
+            role + "metadata: {name: ''}\n",
+            role + "metadata: {name: x, namespace: 7}\n",
+        ):
+            with self.subTest(body=body[:60]), tempfile.TemporaryDirectory() as tmp:
+                suffix = "json" if body.startswith("{") else "yaml"
+                (Path(tmp) / f"x.{suffix}").write_text(body)
+                code, _ = run(["snapshot", "--from-manifests", tmp])
+                self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_json_nested_past_the_recursion_limit_is_a_data_error(self):
+        """Whether the decoder recurses depends on the Python build, so the
+        limit is simulated rather than reached."""
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "x.json").write_text('{"kind": "Role"}')
+            with mock.patch("rbac_audit._json_documents", side_effect=RecursionError):
+                code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_an_empty_or_null_namespace_is_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sa.yaml").write_text(
+                "apiVersion: v1\nkind: ServiceAccount\nmetadata: {name: a, namespace: ''}\n"
+                "---\napiVersion: v1\nkind: ServiceAccount\nmetadata: {name: b, namespace: null}\n"
+            )
+            code, snap = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        sas = json.loads(snap)["serviceAccounts"]
+        self.assertEqual({sa["namespace"] for sa in sas}, {"default"})
+
+    def test_a_directory_that_cannot_be_listed_is_no_input(self):
+        """os.walk skips what it cannot list; the snapshot must not."""
+        real = os.scandir
+
+        def scandir(path="."):
+            if os.path.basename(os.fspath(path)) == "rbac":
+                raise PermissionError(13, "Permission denied", path)
+            return real(path)
+
+        with mock.patch("os.scandir", side_effect=scandir):
+            code, _ = run(["snapshot", "--from-manifests", MANIFESTS])
+        self.assertEqual(code, ra.EXIT_NOINPUT)
+
+    def test_a_kind_list_is_unwrapped(self):
+        lst = (
+            "apiVersion: v1\nkind: List\nitems:\n"
+            "- apiVersion: rbac.authorization.k8s.io/v1\n"
+            "  kind: ClusterRole\n  metadata:\n    name: from-list\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "list.yaml").write_text(lst)
+            code, text = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertEqual(
+            [r["name"] for r in json.loads(text)["clusterRoles"]], ["from-list"]
+        )
+
+    def test_a_namespace_on_a_cluster_scoped_object_is_dropped(self):
+        """The API server ignores it, so two copies differing only in it are
+        still the same object."""
+        role = (
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+            "metadata:\n  name: x\n  namespace: {}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.yaml").write_text(role.format("a"))
+            code, text = self.snapshot(tmp)
+            self.assertEqual(code, ra.EXIT_OK)
+            self.assertNotIn("namespace", json.loads(text)["clusterRoles"][0])
+            (Path(tmp) / "b.yaml").write_text(role.format("b"))
+            code, _ = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_an_object_defined_twice_is_a_data_error(self):
+        """Which copy the cluster gets depends on apply order; guessing would
+        gate a cluster nobody will run."""
+        role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: x\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.yaml").write_text(role)
+            (Path(tmp) / "b.yaml").write_text(role)
+            code, _ = run(["snapshot", "--from-manifests", tmp])
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    AGGREGATED = (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+        "metadata: {{name: team-admin}}\n"
+        "aggregationRule:\n  clusterRoleSelectors:\n"
+        "  - matchLabels: {{acme.io/to-team-admin: 'true'}}\n"
+        "rules: []\n"
+        "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+        "metadata: {{name: anything{labels}}}\n"
+        "rules: [{{apiGroups: ['*'], resources: ['*'], verbs: ['*']}}]\n"
+        "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\n"
+        "metadata: {{name: devs}}\n"
+        "roleRef: {{apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: team-admin}}\n"
+        "subjects: [{{kind: Group, name: devs}}]\n"
+    )
+
+    def test_an_aggregated_role_holds_its_contributors_rules(self):
+        """What the aggregation controller would write, as a cluster snapshot
+        records it, and not the `rules: []` the manifest declares."""
+        labels = ", labels: {acme.io/to-team-admin: 'true'}"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "r.yaml").write_text(self.AGGREGATED.format(labels=labels))
+            code, text = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        roles = {r["name"]: r for r in json.loads(text)["clusterRoles"]}
+        self.assertEqual(roles["team-admin"]["rules"], roles["anything"]["rules"])
+
+    def test_a_label_that_joins_an_aggregate_fails_the_gate(self):
+        """The label alone hands `*` to everyone bound to the aggregate. Without
+        aggregation the diff read "No changes." and exited 0."""
+        labels = ", labels: {acme.io/to-team-admin: 'true'}"
+        with tempfile.TemporaryDirectory() as tmp:
+            snaps = []
+            for name, body in (
+                ("before", self.AGGREGATED.format(labels="")),
+                ("after", self.AGGREGATED.format(labels=labels)),
+            ):
+                tree = Path(tmp) / name
+                tree.mkdir()
+                (tree / "r.yaml").write_text(body)
+                snaps.append(str(Path(tmp) / f"{name}.json"))
+                run(["snapshot", "--from-manifests", str(tree), "-o", snaps[-1]])
+            code, out = run(["diff", *snaps])
+        self.assertEqual(code, ra.EXIT_VIOLATIONS)
+        self.assertIn("[wildcard] ClusterRole/team-admin", out)
+
+    def test_aggregation_reads_selectors_as_kubernetes_does(self):
+        """matchExpressions, and an aggregate that selects another one, as
+        admin selects edit."""
+        head = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+        tree = (
+            head + "metadata: {name: top}\naggregationRule:\n  clusterRoleSelectors:\n"
+            "  - matchExpressions: [{key: tier, operator: In, values: [mid]}]\n"
+            "---\n" + head + "metadata: {name: mid, labels: {tier: mid}}\n"
+            "aggregationRule:\n  clusterRoleSelectors:\n"
+            "  - matchExpressions:\n"
+            "    - {key: tier, operator: NotIn, values: [mid]}\n"
+            "    - {key: extra, operator: Exists}\n"
+            "    - {key: skip, operator: DoesNotExist}\n"
+            "---\n" + head + "metadata: {name: leaf, labels: {extra: 'y'}}\n"
+            "rules: [{apiGroups: [''], resources: [secrets], verbs: [get]}]\n"
+            "---\n"
+            + head
+            + "metadata: {name: skipped, labels: {extra: 'y', skip: 'y'}}\n"
+            "rules: [{apiGroups: [''], resources: [nodes], verbs: [delete]}]\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "r.yaml").write_text(tree)
+            code, text = self.snapshot(tmp)
+            self.assertEqual(code, ra.EXIT_OK)
+            roles = {r["name"]: r for r in json.loads(text)["clusterRoles"]}
+            leaf = roles["leaf"]["rules"]
+            self.assertEqual(roles["mid"]["rules"], leaf)
+            self.assertEqual(roles["top"]["rules"], leaf)
+            (Path(tmp) / "r.yaml").write_text(tree.replace("DoesNotExist", "Absent"))
+            code, _ = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_DATAERR)
+
+    def test_a_contributor_to_a_role_outside_the_tree_is_reported(self):
+        """admin, edit and view are never in a manifest tree, so what a role
+        labelled for them adds cannot be judged. It is said, not passed."""
+        role = (
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+            "metadata:\n  name: crd-admin\n  labels:\n"
+            "    rbac.authorization.k8s.io/aggregate-to-admin: 'true'\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "r.yaml").write_text(role)
+            with self.assertLogs(ra.log, "WARNING") as logs:
+                code, _ = self.snapshot(tmp)
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertIn("ClusterRole/crd-admin", logs.output[0])
+
+    def test_the_pull_request_gate(self):
+        """Snapshot the PR's manifests, diff against the committed baseline,
+        gate on the exit code — with the pod-dependent rule reported as not
+        checked rather than passed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "base.json"
+            empty.write_text(ra.dump_snapshot(ra.empty_snapshot()))
+            proposed = Path(tmp) / "pr.json"
+            run(["snapshot", "--from-manifests", MANIFESTS, "-o", str(proposed)])
+            code, out = run(["diff", str(empty), str(proposed)])
+        self.assertEqual(code, ra.EXIT_OK)
+        self.assertIn("Not checked (1)", out)
+        self.assertIn("unused-service-account", out)
 
 
 if __name__ == "__main__":

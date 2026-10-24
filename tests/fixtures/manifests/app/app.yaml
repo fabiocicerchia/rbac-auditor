@@ -1,0 +1,26 @@
+# Not RBAC: ignored, not reported.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web
+  namespace: ci
+data:
+  greeting: hello
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deployer
+  namespace: ci
+---
+# A same-named kind from another API group is not RBAC either.
+apiVersion: example.com/v1
+kind: Role
+metadata:
+  name: not-rbac
+---
+# No namespace: read as `default`, where `kubectl apply` would put it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: builder
