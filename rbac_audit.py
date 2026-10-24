@@ -319,6 +319,48 @@ def manifest_documents(directory):
                 yield path, document
 
 
+def _snapshot_kind(path, document):
+    """The snapshot kind this manifest document is, or None to skip it.
+
+    Fails closed on a kind or apiVersion that is not a string: a gate cannot
+    tell what a kind of [Role] would be.
+    """
+    kind = document.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        raise ManifestError(f"{path}: a kind that is not a string")
+    if kind not in MANIFEST_GROUPS:
+        return None
+    api_version = document.get("apiVersion")
+    if api_version is not None and not isinstance(api_version, str):
+        raise ManifestError(f"{path}: a {kind} whose apiVersion is not a string")
+    return kind if _api_group(api_version) == MANIFEST_GROUPS[kind] else None
+
+
+def _as_applied(path, kind, document):
+    """A copy of `document` with the metadata the API server would store."""
+    meta = document.get("metadata")
+    if (
+        not isinstance(meta, dict)
+        or not isinstance(meta.get("name"), str)
+        or not meta["name"]
+    ):
+        raise ManifestError(f"{path}: a {kind} with no metadata.name")
+    document = copy.deepcopy(document)
+    meta = document["metadata"]
+    if kind in NAMESPACED_KINDS:
+        namespace = meta.get("namespace")
+        if namespace is not None and not isinstance(namespace, str):
+            raise ManifestError(
+                f"{path}: {kind} {meta['name']} has a namespace that is not a string"
+            )
+        # Empty and null mean unset to the API server, as absent does.
+        meta["namespace"] = namespace or "default"
+    else:
+        # The API server drops a namespace on a cluster-scoped object.
+        meta.pop("namespace", None)
+    return document
+
+
 def capture_manifests(directory):
     """Snapshot a directory of manifests: the file-only twin of `capture`.
 
@@ -336,37 +378,11 @@ def capture_manifests(directory):
     snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
     by_kind = {kind: {} for _, kind, _, _ in SECTIONS}
     for path, document in manifest_documents(directory):
-        kind = document.get("kind")
-        if kind is not None and not isinstance(kind, str):
-            # Fail closed: a gate cannot tell what a kind of [Role] would be.
-            raise ManifestError(f"{path}: a kind that is not a string")
-        if kind not in by_kind:
+        kind = _snapshot_kind(path, document)
+        if kind is None:
             continue
-        api_version = document.get("apiVersion")
-        if api_version is not None and not isinstance(api_version, str):
-            raise ManifestError(f"{path}: a {kind} whose apiVersion is not a string")
-        if _api_group(api_version) != MANIFEST_GROUPS[kind]:
-            continue
-        meta = document.get("metadata")
-        if (
-            not isinstance(meta, dict)
-            or not isinstance(meta.get("name"), str)
-            or not meta["name"]
-        ):
-            raise ManifestError(f"{path}: a {kind} with no metadata.name")
-        document = copy.deepcopy(document)
+        document = _as_applied(path, kind, document)
         meta = document["metadata"]
-        if kind in NAMESPACED_KINDS:
-            namespace = meta.get("namespace")
-            if namespace is not None and not isinstance(namespace, str):
-                raise ManifestError(
-                    f"{path}: {kind} {meta['name']} has a namespace that is not a string"
-                )
-            # Empty and null mean unset to the API server, as absent does.
-            meta["namespace"] = namespace or "default"
-        else:
-            # The API server drops a namespace on a cluster-scoped object.
-            meta.pop("namespace", None)
         key = (meta.get("namespace", ""), meta["name"])
         if key in by_kind[kind]:
             first = by_kind[kind][key][0]
