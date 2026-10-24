@@ -416,13 +416,23 @@ def _aggregation_selectors(roles):
         rule = document.get("aggregationRule")
         if not rule:
             continue
-        chosen = rule.get("clusterRoleSelectors") if isinstance(rule, dict) else None
-        if not isinstance(chosen, list):
+        listed = rule.get("clusterRoleSelectors") if isinstance(rule, dict) else None
+        if not isinstance(listed, list):
             raise ManifestError(
                 f"{path}: aggregationRule has no clusterRoleSelectors list"
             )
-        selectors[name] = chosen
+        selectors[name] = listed
     return selectors
+
+
+def _selected_roles(path, aggregate, selectors, labels):
+    """The other ClusterRoles any of `aggregate`'s selectors match, sorted."""
+    return sorted(
+        other
+        for other, other_labels in labels.items()
+        if other != aggregate
+        and any(_selector_matches(path, s, other_labels) for s in selectors)
+    )
 
 
 def _fill_aggregates(roles, members):
@@ -484,13 +494,8 @@ def _aggregate(cluster_roles):
     }
     labels = {name: _labels(path, document) for name, (path, document) in roles.items()}
     members = {
-        name: sorted(
-            other
-            for other in roles
-            if other != name
-            and any(_selector_matches(roles[name][0], s, labels[other]) for s in chosen)
-        )
-        for name, chosen in _aggregation_selectors(roles).items()
+        name: _selected_roles(roles[name][0], name, selectors, labels)
+        for name, selectors in _aggregation_selectors(roles).items()
     }
     _fill_aggregates(roles, members)
     _warn_unselected_contributors(
