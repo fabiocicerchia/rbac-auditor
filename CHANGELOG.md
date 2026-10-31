@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v2.0.1...v2.1.0) (2026-10-31)
+
+
+### Features
+
+* **policy:** masters-subject rule for a new binding to system:masters ([#98](https://github.com/fabiocicerchia/rbac-auditor/issues/98)) ([31c3889](https://github.com/fabiocicerchia/rbac-auditor/commit/31c38899470d4a9cd826e86e1b0e1b2df95c5c19))
+* **snapshot:** --from-manifests DIR, so the gate can run on a pull request ([#99](https://github.com/fabiocicerchia/rbac-auditor/issues/99)) ([31d8a13](https://github.com/fabiocicerchia/rbac-auditor/commit/31d8a13c5a19ba44908daaf99583a3406dee577a))
+
 ## [2.0.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v2.0.0...v2.0.1) (2026-09-20)
 
 
