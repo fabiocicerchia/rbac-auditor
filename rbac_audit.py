@@ -930,6 +930,15 @@ DEFAULT_POLICY = {
             "fail": True,
             "subjects": ["system:anonymous", "system:unauthenticated"],
         },
+        # The group the API server lets through before RBAC is consulted at
+        # all — stronger than cluster-admin, which is at least an RBAC object.
+        # Its own rule rather than an entry in anonymous-subject's list, so a
+        # break-glass grant can be exempted without exempting anonymous access.
+        "masters-subject": {
+            "enabled": True,
+            "fail": True,
+            "subjects": ["system:masters"],
+        },
         "dangling-binding": {"enabled": True, "fail": True},
         # Hygiene rather than escalation, so it warns by default where the
         # others block: an unused ServiceAccount is a credential nobody is
@@ -1226,23 +1235,33 @@ def check_unused_service_account(change, settings, state):
     )
 
 
-def check_anonymous_subject(change, settings, state):
-    """A new binding to system:anonymous or system:unauthenticated.
+def _watched_subjects(rule, change, settings):
+    """A new binding to any subject named in the rule's `subjects` list.
 
-    subjects.added, not newlyGranted: this rule watches the subject, and a
+    subjects.added, not newlyGranted: these rules watch the subject, and a
     subject already named by this binding is not newly bound to it. Narrowing
-    the binding's role is not a new anonymous grant.
+    the binding's role is not a new grant to that subject.
     """
     watched = set(settings["subjects"])
     for subject in change.get("subjects", {}).get("added", []):
         if subject.get("name") in watched:
             ref = change.get("roleRef") or {}
             yield _violation(
-                "anonymous-subject",
+                rule,
                 change,
                 f"binds {subject_str(subject)} to {ref.get('kind')}/{ref.get('name')}",
                 subject=subject_str(subject),
             )
+
+
+def check_anonymous_subject(change, settings, state):
+    """A new binding to system:anonymous or system:unauthenticated."""
+    yield from _watched_subjects("anonymous-subject", change, settings)
+
+
+def check_masters_subject(change, settings, state):
+    """A new binding to system:masters, which bypasses RBAC entirely."""
+    yield from _watched_subjects("masters-subject", change, settings)
 
 
 CHECKS = {
@@ -1250,6 +1269,7 @@ CHECKS = {
     "wildcard": check_wildcard,
     "escalating-verbs": check_escalating_verbs,
     "anonymous-subject": check_anonymous_subject,
+    "masters-subject": check_masters_subject,
     "dangling-binding": check_dangling_binding,
     "unused-service-account": check_unused_service_account,
 }

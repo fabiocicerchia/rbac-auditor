@@ -42,6 +42,13 @@ rules:
     fail: true
     subjects: [system:anonymous, system:unauthenticated]
 
+  # A new binding to the group the API server admits before RBAC is consulted
+  # at all — stronger than cluster-admin. Add your own break-glass groups.
+  masters-subject:
+    enabled: true
+    fail: true
+    subjects: [system:masters]
+
   # A binding naming a ServiceAccount that does not exist. Inert today, and a
   # live grant the moment somebody creates one with that name in that
   # namespace — Kubernetes accepts the binding and never warns.
@@ -90,3 +97,10 @@ exempt:
   - rule: cluster-admin-binding
     subject: Group system:masters
     reason: the bootstrap group, reviewed 2026-09
+
+  # Every cluster ships this binding, so a first `baseline` reports it. Exempt
+  # it by object as well as subject: a second binding to the group still fires.
+  - rule: masters-subject
+    object: ClusterRoleBinding/cluster-admin
+    subject: Group system:masters
+    reason: the bootstrap binding every cluster ships with, reviewed 2026-09

@@ -156,7 +156,7 @@ thing it does without `--subject`.
 
 ## The policy
 
-With no policy file, these six rules are on:
+With no policy file, these seven rules are on:
 
 | Rule                     | Reports                                                         | Default |
 | ------------------------ | --------------------------------------------------------------- | ------- |
@@ -164,6 +164,7 @@ With no policy file, these six rules are on:
 | `wildcard`               | a new grant with `*` in `verbs`, `resources` or `apiGroups`     | fails   |
 | `escalating-verbs`       | a new grant of `bind`, `escalate` or `impersonate`              | fails   |
 | `anonymous-subject`      | a new binding to `system:anonymous` or `system:unauthenticated` | fails   |
+| `masters-subject`        | a new binding to `system:masters`, which bypasses RBAC          | fails   |
 | `dangling-binding`       | a binding naming a ServiceAccount that does not exist           | fails   |
 | `unused-service-account` | a ServiceAccount no pod mounts                                  | warns   |
 
@@ -209,6 +210,10 @@ exempt:
   - rule: cluster-admin-binding
     subject: Group system:masters
     reason: the bootstrap group, reviewed 2026-09
+  - rule: masters-subject
+    object: ClusterRoleBinding/cluster-admin
+    subject: Group system:masters
+    reason: the bootstrap binding every cluster ships with, reviewed 2026-09
 ```
 
 An entry constrains only the fields it names — `rule`, `object`, `subject` —
@@ -249,12 +254,13 @@ rules:
 
 Every rule's list is configurable the same way: `roles` for
 `cluster-admin-binding`, `verbs` for `escalating-verbs`, `subjects` for
-`anonymous-subject`, `ignore` for `unused-service-account` (which already
-ignores `default`, since every namespace has one and a pod naming no account
-gets it). They are lists, and the file is rejected if you write a
-bare string — `verbs: bind` instead of `verbs: [bind]` would turn a membership
-test into a substring one, and a security check that quietly stops matching is
-the thing this tool exists to prevent.
+`anonymous-subject` and `masters-subject`, `ignore` for
+`unused-service-account` (which already ignores `default`, since every
+namespace has one and a pod naming no account gets it). They are lists, and the
+file is rejected if you write a bare string — `verbs: bind` instead of
+`verbs: [bind]` would turn a membership test into a substring one, and a
+security check that quietly stops matching is the thing this tool exists to
+prevent.
 
 A malformed policy is a fatal error rather than a warning, and an unknown rule
 name is an error rather than being ignored: a typo would otherwise leave that
