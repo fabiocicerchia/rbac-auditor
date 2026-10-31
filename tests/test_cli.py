@@ -68,6 +68,14 @@ class ExitCodeTest(unittest.TestCase):
         self.assertIn("(none gating)", out)
         self.assertNotIn("No policy violations.", out)
 
+    def test_a_new_binding_to_system_masters_fails_the_gate(self):
+        """masters.json is after.json plus one view binding to the group, so
+        masters-subject is the only rule with anything new to say."""
+        code, out = run(["diff", AFTER, str(FIXTURES / "masters.json")])
+        self.assertEqual(code, ra.EXIT_VIOLATIONS)
+        self.assertIn("[masters-subject]", out)
+        self.assertIn("ClusterRoleBinding/breakglass", out)
+
     def test_a_missing_snapshot_exits_66(self):
         code, _ = run(["diff", str(FIXTURES / "nope.json"), AFTER])
         self.assertEqual(code, ra.EXIT_NOINPUT)

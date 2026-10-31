@@ -49,14 +49,23 @@ if docker run --rm "$IMAGE" snapshot 2>&1 | grep -q "Traceback"; then
 fi
 
 # Files only, no cluster: the diff renders and the policy gate exits 2.
-run diff /fixtures/before.json /fixtures/after.json >/tmp/diff.txt 2>&1 && rc=0 || rc=$?
+run diff /fixtures/before.json /fixtures/after.json >"$WORK/diff.txt" 2>&1 && rc=0 || rc=$?
 if [ "$rc" -ne 2 ]; then
   echo "FAIL: a policy violation should exit 2, got $rc" >&2
-  cat /tmp/diff.txt >&2
+  cat "$WORK/diff.txt" >&2
   exit 1
 fi
-grep -q "cluster-admin-binding" /tmp/diff.txt
-grep -q "anonymous-subject" /tmp/diff.txt
+grep -q "cluster-admin-binding" "$WORK/diff.txt"
+grep -q "anonymous-subject" "$WORK/diff.txt"
+
+# A new binding to system:masters is its own blocking finding.
+run diff /fixtures/after.json /fixtures/masters.json >"$WORK/masters.txt" 2>&1 && rc=0 || rc=$?
+if [ "$rc" -ne 2 ]; then
+  echo "FAIL: a new binding to system:masters should exit 2, got $rc" >&2
+  cat "$WORK/masters.txt" >&2
+  exit 1
+fi
+grep -q "masters-subject" "$WORK/masters.txt"
 
 # The same diff scoped to one subject, as a matrix.
 run diff /fixtures/before.json /fixtures/after.json \
@@ -68,39 +77,39 @@ run diff /fixtures/before.json /fixtures/before.json | grep -q "No changes."
 # Tightening RBAC must never fail the gate: narrowed.json drops a verb, drops
 # an escalation verb and restricts a rule to one resourceName. The rules all
 # change, so a rule-level diff would call the survivors new grants.
-run diff /fixtures/after.json /fixtures/narrowed.json >/tmp/narrow.txt 2>&1 && rc=0 || rc=$?
+run diff /fixtures/after.json /fixtures/narrowed.json >"$WORK/narrow.txt" 2>&1 && rc=0 || rc=$?
 if [ "$rc" -ne 0 ]; then
   echo "FAIL: narrowing RBAC should exit 0, got $rc" >&2
-  cat /tmp/narrow.txt >&2
+  cat "$WORK/narrow.txt" >&2
   exit 1
 fi
-grep -q "No policy violations." /tmp/narrow.txt
+grep -q "No policy violations." "$WORK/narrow.txt"
 
 # --no-policy prints what it would have blocked rather than hiding it.
 run diff /fixtures/before.json /fixtures/after.json --no-policy | grep -q "(warn)"
 
 # baseline judges the whole cluster, not just what changed: everything counts
 # as an addition, so the standing cluster-admin binding is reported.
-run baseline /fixtures/after.json >/tmp/base.txt 2>&1 && rc=0 || rc=$?
+run baseline /fixtures/after.json >"$WORK/base.txt" 2>&1 && rc=0 || rc=$?
 if [ "$rc" -ne 2 ]; then
   echo "FAIL: baseline on a cluster with a cluster-admin binding should exit 2, got $rc" >&2
-  cat /tmp/base.txt >&2
+  cat "$WORK/base.txt" >&2
   exit 1
 fi
-grep -q "RBAC baseline" /tmp/base.txt
-grep -q "cluster-admin-binding" /tmp/base.txt
+grep -q "RBAC baseline" "$WORK/base.txt"
+grep -q "cluster-admin-binding" "$WORK/base.txt"
 # A rule that cannot run says so rather than passing silently.
-grep -q "Not checked" /tmp/base.txt
-grep -q "unused-service-account" /tmp/base.txt
+grep -q "Not checked" "$WORK/base.txt"
+grep -q "unused-service-account" "$WORK/base.txt"
 
 # A binding to a ServiceAccount that does not exist is a latent privilege grant.
-run diff /fixtures/after.json /fixtures/dangling.json >/tmp/dangle.txt 2>&1 && rc=0 || rc=$?
+run diff /fixtures/after.json /fixtures/dangling.json >"$WORK/dangle.txt" 2>&1 && rc=0 || rc=$?
 if [ "$rc" -ne 2 ]; then
   echo "FAIL: a new dangling binding should exit 2, got $rc" >&2
-  cat /tmp/dangle.txt >&2
+  cat "$WORK/dangle.txt" >&2
   exit 1
 fi
-grep -q "dangling-binding" /tmp/dangle.txt
+grep -q "dangling-binding" "$WORK/dangle.txt"
 
 # A --json diff report is not a snapshot, even though it shares the apiVersion.
 run diff /fixtures/before.json /fixtures/after.json --json /out/report.json \
@@ -115,5 +124,4 @@ if [ "$rc" -ne 65 ]; then
   exit 1
 fi
 
-rm -f /tmp/diff.txt /tmp/narrow.txt /tmp/base.txt /tmp/dangle.txt
 echo PASS
