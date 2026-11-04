@@ -1,0 +1,12 @@
+extends: relaxed
+
+# Helm templates are Go templates rather than YAML, the same exclusion the
+# check-yaml hook in .pre-commit-config.yaml makes.
+ignore: |
+  templates/
+
+rules:
+  # Actions and images are pinned by SHA or digest with the tag in a trailing
+  # comment (see CLAUDE.md), which cannot be wrapped and runs past 80.
+  line-length:
+    max: 130
