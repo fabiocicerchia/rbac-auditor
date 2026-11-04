@@ -17,10 +17,13 @@ metadata:
 apiVersion: example.com/v1
 kind: Role
 metadata:
+  # Fixture: the missing namespace is the input under test, not a deployment.
+  # kics-scan ignore-line
   name: not-rbac
 ---
 # No namespace: read as `default`, where `kubectl apply` would put it.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  # kics-scan ignore-line
   name: builder

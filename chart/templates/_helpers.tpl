@@ -36,13 +36,12 @@ metadata:
   labels:
     {{- include "app.selectorLabels" . | nindent 4 }}
     {{- with .Values.podLabels }}{{- toYaml . | nindent 4 }}{{- end }}
-  {{- if or .Values.config.files .Values.podAnnotations }}
   annotations:
+    container.apparmor.security.beta.kubernetes.io/{{ include "app.name" . }}: runtime/default
     {{- with .Values.config.files }}
     checksum/config: {{ toYaml . | sha256sum }}
     {{- end }}
     {{- with .Values.podAnnotations }}{{- toYaml . | nindent 4 }}{{- end }}
-  {{- end }}
 spec:
   {{- if eq .Values.kind "CronJob" }}
   restartPolicy: {{ .Values.cron.restartPolicy }}
