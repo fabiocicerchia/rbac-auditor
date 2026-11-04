@@ -6,11 +6,12 @@ FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c03
 ARG KUBECTL_VERSION
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-RUN apk add --no-cache curl ca-certificates
+# busybox wget over the base image's ssl_client and CA bundle: no apk add,
+# so no unpinned package versions in the build.
 # pipefail so the checksum comparison below can't be silently skipped
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
-RUN curl -fsSLo /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl" \
- && curl -fsSLo /kubectl.sha256 "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl.sha256" \
+RUN wget -qO /kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl" \
+ && wget -qO /kubectl.sha256 "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl.sha256" \
  && echo "$(cat /kubectl.sha256)  /kubectl" | sha256sum -c - \
  && chmod 0755 /kubectl
 
@@ -27,6 +28,8 @@ COPY NOTICE /NOTICE
 COPY --from=fetch /kubectl /usr/local/bin/kubectl
 COPY rbac_audit.py /usr/local/bin/rbac-audit
 USER 10001
+# A one-shot CLI, not a daemon: there is nothing to probe.
+HEALTHCHECK NONE
 # hardener: run this image with `docker run --read-only` for a read-only rootfs
 ENTRYPOINT ["python", "/usr/local/bin/rbac-audit"]
 CMD ["snapshot"]

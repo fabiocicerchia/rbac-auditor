@@ -15,9 +15,11 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: {{ include "app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels: {{- include "app.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.cron.schedule | quote }}
+  startingDeadlineSeconds: {{ .Values.cron.startingDeadlineSeconds }}
   suspend: {{ .Values.cron.suspend }}
   concurrencyPolicy: {{ .Values.cron.concurrencyPolicy }}
   successfulJobsHistoryLimit: {{ .Values.cron.successfulJobsHistoryLimit }}

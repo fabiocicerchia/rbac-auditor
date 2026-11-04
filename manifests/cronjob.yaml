@@ -7,9 +7,17 @@ metadata:
   namespace: security
 spec:
   schedule: "0 5 * * 1"
+  # A run missed by more than an hour is skipped, not started at a random time.
+  startingDeadlineSeconds: 3600
   jobTemplate:
     spec:
       template:
+        metadata:
+          annotations:
+            container.apparmor.security.beta.kubernetes.io/audit: runtime/default
+        # False positive for "token automount not disabled": the token is how
+        # this job reads the RBAC API, so it has to be mounted.
+        # kics-scan ignore-line
         spec:
           serviceAccountName: rbac-auditor
           restartPolicy: Never
@@ -25,6 +33,7 @@ spec:
               # Pinned: the bare name resolved to :latest, which would silently
               # change what this cluster-reader runs. Matches publish.yml.
               image: ghcr.io/fabiocicerchia/rbac-auditor:1.0.0
+              imagePullPolicy: Always
               args: ["snapshot"]
               securityContext:
                 allowPrivilegeEscalation: false

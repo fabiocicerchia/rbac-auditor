@@ -3,7 +3,7 @@ kind: CronJob
 image:
   repository: ghcr.io/fabiocicerchia/rbac-auditor
   tag: ""
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 imagePullSecrets: []
 
 nameOverride: ""
@@ -21,6 +21,7 @@ config:
 
 cron:
   schedule: "0 6 * * *"
+  startingDeadlineSeconds: 3600
   suspend: false
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
