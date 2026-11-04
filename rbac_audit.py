@@ -77,7 +77,9 @@ def kubectl_json(resource, context=None):
         cmd += ["--context", context]
     cmd += ["get", resource, "-A", "-o", "json"]
     try:
-        proc = subprocess.run(
+        # argv list, no shell: --context and the resource reach kubectl as
+        # single arguments, never parsed by a shell.
+        proc = subprocess.run(  # nosec B603
             cmd,
             capture_output=True,
             text=True,
