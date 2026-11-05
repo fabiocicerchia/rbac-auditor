@@ -9,7 +9,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Fabio Cicerchia" }]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 # A floor, not a pin: requirements.txt is the pinned, hash-checked lockfile
 # the image installs from, and pinning here as well would make a `pip install`
 # of this package fight whatever the environment already has.
