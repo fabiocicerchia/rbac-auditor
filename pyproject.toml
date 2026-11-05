@@ -20,7 +20,11 @@ dynamic = ["version"]
 Homepage = "https://github.com/fabiocicerchia/rbac-auditor"
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["coverage", "pytest", "ruff"]
+
+# Measure the module, not the tests that exercise it.
+[tool.coverage.run]
+source = ["rbac_audit"]
 
 [project.scripts]
 rbac-audit = "rbac_audit:main"
