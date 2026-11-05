@@ -2,8 +2,9 @@ apiVersion: v2
 name: rbac-auditor
 description: Helm chart for rbac-auditor
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+# The image tag the chart deploys by default; keep it equal to version.txt.
+appVersion: "2.0.1"  # VERSION-BUMP
 
 # License of the packaged application. ArtifactHub reads this annotation.
 annotations:
