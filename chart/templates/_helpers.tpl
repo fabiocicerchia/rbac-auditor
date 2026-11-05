@@ -47,6 +47,9 @@ spec:
   restartPolicy: {{ .Values.cron.restartPolicy }}
   {{- end }}
   serviceAccountName: {{ include "app.serviceAccountName" . }}
+  # The auditor reads the API with this token, so it is mounted explicitly
+  # (kube-api-access below) rather than by the automount.
+  automountServiceAccountToken: false
   {{- with .Values.imagePullSecrets }}
   imagePullSecrets: {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -88,6 +91,9 @@ spec:
       volumeMounts:
         - name: tmp
           mountPath: /tmp
+        - name: kube-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
         {{- if .Values.config.files }}
         - name: config
           mountPath: {{ .Values.config.mountPath }}
@@ -101,6 +107,23 @@ spec:
   volumes:
     - name: tmp
       emptyDir: {}
+    # What the automount would have projected: token, cluster CA, namespace.
+    - name: kube-api-access
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3607
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+                - key: ca.crt
+                  path: ca.crt
+          - downwardAPI:
+              items:
+                - path: namespace
+                  fieldRef:
+                    fieldPath: metadata.namespace
     {{- if .Values.config.files }}
     - name: config
       configMap:

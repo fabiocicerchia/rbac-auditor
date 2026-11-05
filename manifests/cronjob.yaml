@@ -4,6 +4,9 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: rbac-auditor
+  # False positive for "without LimitRange/ResourceQuota": those are policy
+  # for the whole namespace, owned by its admin, not by one workload in it.
+  # kics-scan ignore-line
   namespace: security
 spec:
   schedule: "0 5 * * 1"
@@ -42,6 +45,7 @@ spec:
                   drop: [ALL]
               # It reads the RBAC API and writes a snapshot to stdout; no CPU
               # limit on purpose, since throttling a weekly job buys nothing.
+              # kics-scan ignore-line
               resources:
                 requests: { cpu: 50m, memory: 128Mi }
                 limits: { memory: 512Mi }
