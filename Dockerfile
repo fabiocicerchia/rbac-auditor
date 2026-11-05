@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
 COPY NOTICE /NOTICE
 COPY --from=fetch /kubectl /usr/local/bin/kubectl
 COPY rbac_audit.py /usr/local/bin/rbac-audit
+# Beside the script: Python puts the script's directory on sys.path.
+COPY rbac_audit_policy.py /usr/local/bin/rbac_audit_policy.py
 USER 10001
 # A one-shot CLI, not a daemon: there is nothing to probe.
 HEALTHCHECK NONE

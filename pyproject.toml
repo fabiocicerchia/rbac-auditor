@@ -26,7 +26,7 @@ dev = ["pytest", "ruff"]
 rbac-audit = "rbac_audit:main"
 
 [tool.setuptools]
-py-modules = ["rbac_audit"]
+py-modules = ["rbac_audit", "rbac_audit_policy"]
 
 # Read from the one place the version already lives, so a release bump does not
 # have to be repeated here and cannot drift from it.
