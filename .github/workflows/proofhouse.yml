@@ -54,6 +54,8 @@ jobs:
       - name: Run gandalf
         # A red verdict is the run most worth recording, so it must not stop the
         # POST below. gandalf-pr-review.yml is where findings gate a change.
+        # Kept until gandalf exits differently for a red verdict and a crash; a
+        # crash leaves no report, which the next step fails on.
         continue-on-error: true
         run: |
           docker run --rm \
@@ -63,18 +65,30 @@ jobs:
             sh -c 'git config --global --add safe.directory "*" \
               && PYTHONPATH=/gandalf/src python -m gandalf --no-llm --no-html --out-dir reports'
 
-      - name: Post to proofhouse
-        # Telemetry. A dashboard being down is not this repository's problem.
-        continue-on-error: true
-        env:
-          TOKEN: ${{ secrets.PROOFHOUSE_TOKEN }}
+      # Outside the POST's escape hatch: no report means the scan itself broke,
+      # and that is this repository's problem.
+      - name: Package the report
         run: |
           set -euo pipefail
           # Newest report without parsing `ls` output, which shellcheck refuses.
           report="$(find reports -name 'gandalf-*.json' -printf '%T@ %p\n' \
                     | sort -rn | head -1 | cut -d' ' -f2-)"
+          if [ -z "${report}" ]; then
+            echo "::error::gandalf wrote no report"
+            exit 1
+          fi
           echo "posting ${report} ($(wc -c < "${report}") bytes)"
           gzip -c "${report}" > report.json.gz
+
+      - name: Post to proofhouse
+        # Telemetry. A dashboard being down is not this repository's problem.
+        # Kept for as long as proofhouse is an external service with no SLA;
+        # a failed scan is caught by the step above instead.
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.PROOFHOUSE_TOKEN }}
+        run: |
+          set -euo pipefail
           curl --fail-with-body --silent --show-error \
             --retry 3 --retry-connrefused --max-time 120 \
             -X POST https://app.proofhouse.cloud/v1/runs \
