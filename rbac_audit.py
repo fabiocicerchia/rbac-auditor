@@ -195,28 +195,58 @@ def normalize_service_account(obj):
     return _named(obj)
 
 
+# What each kind of record does at the three places that differ by kind: the
+# capture, the diff and the human rendering. A new kind is a new class here
+# and a row in SECTIONS, not another branch in each of those.
+class RoleShape:
+    normalize = staticmethod(normalize_role)
+
+    @staticmethod
+    def delta(before, after):
+        return _role_delta(before, after)
+
+    @staticmethod
+    def render(change):
+        return _render_role(change)
+
+
+class BindingShape:
+    normalize = staticmethod(normalize_binding)
+
+    @staticmethod
+    def delta(before, after):
+        return _binding_delta(before, after)
+
+    @staticmethod
+    def render(change):
+        return _render_binding(change)
+
+
+class ServiceAccountShape:
+    normalize = staticmethod(normalize_service_account)
+
+    @staticmethod
+    def delta(before, after):
+        return {}
+
+    @staticmethod
+    def render(change):
+        return []
+
+
 # Every kind the snapshot carries: (snapshot key, kind name, kubectl resource,
-# normaliser). Named once because the same tuples are walked from the capture,
+# shape). Named once because the same tuples are walked from the capture,
 # the diff and the subject resolver alike — a kind added to one and not the
 # others is drift the tool stops seeing.
 SECTIONS = (
-    ("clusterRoles", "ClusterRole", "clusterroles", normalize_role),
-    ("roles", "Role", "roles", normalize_role),
-    (
-        "clusterRoleBindings",
-        "ClusterRoleBinding",
-        "clusterrolebindings",
-        normalize_binding,
-    ),
-    ("roleBindings", "RoleBinding", "rolebindings", normalize_binding),
-    (
-        "serviceAccounts",
-        "ServiceAccount",
-        "serviceaccounts",
-        normalize_service_account,
-    ),
+    ("clusterRoles", "ClusterRole", "clusterroles", RoleShape),
+    ("roles", "Role", "roles", RoleShape),
+    ("clusterRoleBindings", "ClusterRoleBinding", "clusterrolebindings", BindingShape),
+    ("roleBindings", "RoleBinding", "rolebindings", BindingShape),
+    ("serviceAccounts", "ServiceAccount", "serviceaccounts", ServiceAccountShape),
 )
 SECTION_KEYS = tuple(section[0] for section in SECTIONS)
+SHAPES = {kind: shape for _, kind, _, shape in SECTIONS}
 BINDING_KEYS = ("clusterRoleBindings", "roleBindings")
 
 
@@ -229,8 +259,8 @@ def object_id(obj):
 def capture(context=None):
     """Snapshot the live cluster. The only function that talks to it."""
     snap = {"apiVersion": SNAPSHOT_VERSION, "kind": SNAPSHOT_KIND}
-    for key, _kind, resource, normalize in SECTIONS:
-        items = [normalize(obj) for obj in kubectl_json(resource, context)]
+    for key, _kind, resource, shape in SECTIONS:
+        items = [shape.normalize(obj) for obj in kubectl_json(resource, context)]
         snap[key] = sorted(items, key=object_id)
     return snap
 
@@ -540,8 +570,10 @@ def capture_manifests(directory):
             )
         by_kind[kind][key] = (path, document)
     _aggregate(by_kind["ClusterRole"].values())
-    for key, kind, _resource, normalize in SECTIONS:
-        items = [normalize(document) for _path, document in by_kind[kind].values()]
+    for key, kind, _resource, shape in SECTIONS:
+        items = [
+            shape.normalize(document) for _path, document in by_kind[kind].values()
+        ]
         snap[key] = sorted(items, key=object_id)
     return snap
 
@@ -845,16 +877,15 @@ def _change(kind, verb, oid, before, after):
         "name": obj["name"],
         "namespace": obj.get("namespace", ""),
     }
-    before, after = before or {}, after or {}
-    if "rules" in obj:
-        change.update(_role_delta(before, after))
-    if "roleRef" in obj:
-        change.update(_binding_delta(before, after))
+    change.update(SHAPES[kind].delta(before or {}, after or {}))
     return change
 
 
 def _role_delta(before, after):
     """The role half of _change; `before` and `after` are {} when absent."""
+    # A snapshot written by hand may leave the field out; there is no delta.
+    if "rules" not in (after or before):
+        return {}
     # `rules` is for a human: it shows the rule text somebody has to edit.
     # `grants` is for the policy: it is what the subject can actually do.
     delta = {
@@ -876,6 +907,8 @@ def _role_delta(before, after):
 
 def _binding_delta(before, after):
     """The binding half of _change; `before` and `after` are {} when absent."""
+    if "roleRef" not in (after or before):
+        return {}
     old_ref = before.get("roleRef")
     new_ref = after.get("roleRef")
     delta = {
@@ -900,7 +933,7 @@ def _binding_delta(before, after):
 def diff_snapshots(old, new):
     """Every object that was added, removed or changed, in a stable order."""
     changes = []
-    for key, kind, _resource, _normalize in SECTIONS:
+    for key, kind, _resource, _shape in SECTIONS:
         was, now = index(old, key), index(new, key)
         for oid in sorted(now.keys() - was.keys()):
             changes.append(_change(kind, "added", oid, None, now[oid]))
@@ -1628,27 +1661,38 @@ def render_changes(changes):
     out = []
     for change in changes:
         out.append(f"{CHANGE_MARK[change['change']]} {change['object']}")
-        ref = change.get("roleRef")
-        if ref:
-            before = change.get("roleRefBefore")
-            moved = f" (was {before['kind']}/{before['name']})" if before else ""
-            out.append(f"    roleRef {ref['kind']}/{ref['name']}{moved}")
-        aggregation = change.get("aggregationRule")
-        if aggregation:
-            for label, value in (
-                ("-", aggregation["before"]),
-                ("+", aggregation["after"]),
-            ):
-                if value is not None:
-                    out.append(f"    {label} aggregationRule {canonical(value)}")
-        for rule in change.get("rules", {}).get("added", []):
-            out.append(f"    + rule {rule_str(rule)}")
-        for rule in change.get("rules", {}).get("removed", []):
-            out.append(f"    - rule {rule_str(rule)}")
-        for subject in change.get("subjects", {}).get("added", []):
-            out.append(f"    + {subject_str(subject)}")
-        for subject in change.get("subjects", {}).get("removed", []):
-            out.append(f"    - {subject_str(subject)}")
+        out += SHAPES[change["kind"]].render(change)
+    return out
+
+
+def _render_role(change):
+    out = []
+    aggregation = change.get("aggregationRule")
+    if aggregation:
+        for label, value in (
+            ("-", aggregation["before"]),
+            ("+", aggregation["after"]),
+        ):
+            if value is not None:
+                out.append(f"    {label} aggregationRule {canonical(value)}")
+    for rule in change.get("rules", {}).get("added", []):
+        out.append(f"    + rule {rule_str(rule)}")
+    for rule in change.get("rules", {}).get("removed", []):
+        out.append(f"    - rule {rule_str(rule)}")
+    return out
+
+
+def _render_binding(change):
+    out = []
+    ref = change.get("roleRef")
+    if ref:
+        before = change.get("roleRefBefore")
+        moved = f" (was {before['kind']}/{before['name']})" if before else ""
+        out.append(f"    roleRef {ref['kind']}/{ref['name']}{moved}")
+    for subject in change.get("subjects", {}).get("added", []):
+        out.append(f"    + {subject_str(subject)}")
+    for subject in change.get("subjects", {}).get("removed", []):
+        out.append(f"    - {subject_str(subject)}")
     return out
 
 
