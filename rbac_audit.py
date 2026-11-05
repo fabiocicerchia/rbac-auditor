@@ -314,15 +314,19 @@ def manifest_documents(directory):
             if not name.endswith(MANIFEST_SUFFIXES):
                 continue
             path = os.path.join(root, name)
-            for document in _read_documents(path):
-                if not isinstance(document, dict):
-                    continue  # an empty document between two `---`
-                if document.get("kind") == "List":
-                    for item in document.get("items") or []:
-                        if isinstance(item, dict):
-                            yield path, item
-                    continue
+            for document in _unwrap_lists(_read_documents(path)):
                 yield path, document
+
+
+def _unwrap_lists(documents):
+    """Each mapping in `documents`, with a `kind: List` replaced by its items."""
+    for document in documents:
+        if not isinstance(document, dict):
+            continue  # an empty document between two `---`
+        if document.get("kind") == "List":
+            yield from (i for i in document.get("items") or [] if isinstance(i, dict))
+        else:
+            yield document
 
 
 def _snapshot_kind(path, document):
@@ -465,18 +469,17 @@ def _warn_unselected_contributors(labels, contributors):
     snapshot can show it; a warning is the one thing better than passing it
     silently.
     """
-    for name in sorted(labels):
-        if name in contributors:
-            continue
+    for name in sorted(labels.keys() - contributors):
         for key in sorted(labels[name]):
-            if key.startswith(AGGREGATE_LABEL_PREFIX):
-                log.warning(
-                    "ClusterRole/%s is labelled %s, but no ClusterRole in this "
-                    "tree selects it: its rules also reach a role this snapshot "
-                    "does not hold, and the gate cannot judge that",
-                    name,
-                    key,
-                )
+            if not key.startswith(AGGREGATE_LABEL_PREFIX):
+                continue
+            log.warning(
+                "ClusterRole/%s is labelled %s, but no ClusterRole in this "
+                "tree selects it: its rules also reach a role this snapshot "
+                "does not hold, and the gate cannot judge that",
+                name,
+                key,
+            )
 
 
 def _aggregate(cluster_roles):
@@ -605,10 +608,10 @@ def _validate_subjects(subjects, where):
         at = f"{where}.subjects[{position}]"
         _require(isinstance(subject, dict), f"{at}: expected an object")
         for field in ("kind", "name", "namespace"):
-            if field in subject:
-                _require(
-                    isinstance(subject[field], str), f"{at}.{field}: expected a string"
-                )
+            _require(
+                isinstance(subject.get(field, ""), str),
+                f"{at}.{field}: expected a string",
+            )
 
 
 def validate_snapshot(data):
@@ -842,45 +845,56 @@ def _change(kind, verb, oid, before, after):
         "name": obj["name"],
         "namespace": obj.get("namespace", ""),
     }
+    before, after = before or {}, after or {}
     if "rules" in obj:
-        # `rules` is for a human: it shows the rule text somebody has to edit.
-        # `grants` is for the policy: it is what the subject can actually do.
-        change["rules"] = _list_delta(
-            (before or {}).get("rules"), (after or {}).get("rules")
-        )
-        change["grants"] = grant_delta(
-            (before or {}).get("rules"), (after or {}).get("rules")
-        )
-        old_aggregation = (before or {}).get("aggregationRule")
-        new_aggregation = (after or {}).get("aggregationRule")
-        if old_aggregation != new_aggregation:
-            # Without this an aggregation-selector change renders as a bare
-            # `~ ClusterRole/x` with nothing under it: a changed object the
-            # diff cannot say anything about is worse than no line at all.
-            change["aggregationRule"] = {
-                "before": old_aggregation,
-                "after": new_aggregation,
-            }
+        change.update(_role_delta(before, after))
     if "roleRef" in obj:
-        old_ref = (before or {}).get("roleRef")
-        new_ref = (after or {}).get("roleRef")
-        change["roleRef"] = new_ref or old_ref
-        change["subjects"] = _list_delta(
-            (before or {}).get("subjects"), (after or {}).get("subjects")
-        )
-        if before and after and old_ref != new_ref:
-            change["roleRefBefore"] = old_ref
-        # Which subjects newly hold the role this binding points at. Normally
-        # the ones added to it — but roleRef is immutable, so a changed one is
-        # a delete and recreate under the same name, and every subject now
-        # points at a different role. Rules that judge *the role* read this;
-        # rules that judge *the subject* read subjects.added, because a subject
-        # already bound here is not newly bound.
-        if change.get("roleRefBefore"):
-            change["newlyGranted"] = list((after or {}).get("subjects") or [])
-        else:
-            change["newlyGranted"] = list(change["subjects"]["added"])
+        change.update(_binding_delta(before, after))
     return change
+
+
+def _role_delta(before, after):
+    """The role half of _change; `before` and `after` are {} when absent."""
+    # `rules` is for a human: it shows the rule text somebody has to edit.
+    # `grants` is for the policy: it is what the subject can actually do.
+    delta = {
+        "rules": _list_delta(before.get("rules"), after.get("rules")),
+        "grants": grant_delta(before.get("rules"), after.get("rules")),
+    }
+    old_aggregation = before.get("aggregationRule")
+    new_aggregation = after.get("aggregationRule")
+    if old_aggregation != new_aggregation:
+        # Without this an aggregation-selector change renders as a bare
+        # `~ ClusterRole/x` with nothing under it: a changed object the
+        # diff cannot say anything about is worse than no line at all.
+        delta["aggregationRule"] = {
+            "before": old_aggregation,
+            "after": new_aggregation,
+        }
+    return delta
+
+
+def _binding_delta(before, after):
+    """The binding half of _change; `before` and `after` are {} when absent."""
+    old_ref = before.get("roleRef")
+    new_ref = after.get("roleRef")
+    delta = {
+        "roleRef": new_ref or old_ref,
+        "subjects": _list_delta(before.get("subjects"), after.get("subjects")),
+    }
+    if before and after and old_ref != new_ref:
+        delta["roleRefBefore"] = old_ref
+    # Which subjects newly hold the role this binding points at. Normally
+    # the ones added to it — but roleRef is immutable, so a changed one is
+    # a delete and recreate under the same name, and every subject now
+    # points at a different role. Rules that judge *the role* read this;
+    # rules that judge *the subject* read subjects.added, because a subject
+    # already bound here is not newly bound.
+    if delta.get("roleRefBefore"):
+        delta["newlyGranted"] = list(after.get("subjects") or [])
+    else:
+        delta["newlyGranted"] = list(delta["subjects"]["added"])
+    return delta
 
 
 def diff_snapshots(old, new):
@@ -986,62 +1000,71 @@ def merge_policy(user):
     if not isinstance(rules, dict):
         raise PolicyError("`rules` must be a mapping of rule name to settings")
     for name, settings in rules.items():
-        if name not in policy["rules"]:
-            known = ", ".join(sorted(policy["rules"]))
-            raise PolicyError(f"unknown policy rule {name!r} (known rules: {known})")
-        if not isinstance(settings, dict):
-            raise PolicyError(f"rule {name!r} must be a mapping")
-        unknown = set(settings) - set(policy["rules"][name])
-        if unknown:
-            raise PolicyError(
-                f"rule {name!r}: unknown setting(s) {', '.join(sorted(unknown))}"
-            )
-        # Types too, not just names. `verbs: bind` instead of `verbs: [bind]`
-        # is a plausible typo, and left unchecked it turns a membership test
-        # into a substring one: the rule silently stops matching what it
-        # should, or starts matching what it should not.
-        for key, value in settings.items():
-            expected = policy["rules"][name][key]
-            if isinstance(expected, bool):
-                if not isinstance(value, bool):
-                    raise PolicyError(
-                        f"rule {name!r}: {key} must be true or false, got {value!r}"
-                    )
-            elif not _is_str_list(value):
-                raise PolicyError(
-                    f"rule {name!r}: {key} must be a list of strings, got {value!r}"
-                )
+        _check_rule_settings(policy["rules"], name, settings)
         policy["rules"][name].update(settings)
 
     exemptions = user.get("exempt") or []
     if not isinstance(exemptions, list):
         raise PolicyError("`exempt` must be a list")
     for position, entry in enumerate(exemptions, 1):
-        if not isinstance(entry, dict):
-            raise PolicyError(f"exempt[{position}] must be a mapping")
-        unknown = set(entry) - set(EXEMPT_MATCH_FIELDS) - {"reason"}
-        if unknown:
-            raise PolicyError(
-                f"exempt[{position}]: unknown key(s) {', '.join(sorted(unknown))}"
-            )
-        if not any(field in entry for field in EXEMPT_MATCH_FIELDS):
-            raise PolicyError(
-                f"exempt[{position}]: needs at least one of "
-                f"{', '.join(EXEMPT_MATCH_FIELDS)}"
-            )
-        for field in EXEMPT_MATCH_FIELDS:
-            # _matches globs with str.endswith, so a non-string here would be
-            # a traceback rather than the parse error it is.
-            if field in entry and not isinstance(entry[field], str):
-                raise PolicyError(
-                    f"exempt[{position}]: {field} must be a string, got {entry[field]!r}"
-                )
-        if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
-            # Same rule the ignore file had: an accepted risk with no stated
-            # reason is indistinguishable from a mistake six months later.
-            raise PolicyError(f"exempt[{position}]: needs a reason")
+        _check_exemption(position, entry)
     policy["exempt"] = [dict(entry) for entry in exemptions]
     return policy
+
+
+def _check_rule_settings(defaults, name, settings):
+    """PolicyError unless `settings` is a valid override of rule `name`."""
+    if name not in defaults:
+        known = ", ".join(sorted(defaults))
+        raise PolicyError(f"unknown policy rule {name!r} (known rules: {known})")
+    if not isinstance(settings, dict):
+        raise PolicyError(f"rule {name!r} must be a mapping")
+    unknown = set(settings) - set(defaults[name])
+    if unknown:
+        raise PolicyError(
+            f"rule {name!r}: unknown setting(s) {', '.join(sorted(unknown))}"
+        )
+    # Types too, not just names. `verbs: bind` instead of `verbs: [bind]`
+    # is a plausible typo, and left unchecked it turns a membership test
+    # into a substring one: the rule silently stops matching what it
+    # should, or starts matching what it should not.
+    for key, value in settings.items():
+        if isinstance(defaults[name][key], bool):
+            if not isinstance(value, bool):
+                raise PolicyError(
+                    f"rule {name!r}: {key} must be true or false, got {value!r}"
+                )
+        elif not _is_str_list(value):
+            raise PolicyError(
+                f"rule {name!r}: {key} must be a list of strings, got {value!r}"
+            )
+
+
+def _check_exemption(position, entry):
+    """PolicyError unless `entry` is a well-formed `exempt` list item."""
+    if not isinstance(entry, dict):
+        raise PolicyError(f"exempt[{position}] must be a mapping")
+    unknown = set(entry) - set(EXEMPT_MATCH_FIELDS) - {"reason"}
+    if unknown:
+        raise PolicyError(
+            f"exempt[{position}]: unknown key(s) {', '.join(sorted(unknown))}"
+        )
+    if not any(field in entry for field in EXEMPT_MATCH_FIELDS):
+        raise PolicyError(
+            f"exempt[{position}]: needs at least one of "
+            f"{', '.join(EXEMPT_MATCH_FIELDS)}"
+        )
+    for field in EXEMPT_MATCH_FIELDS:
+        # _matches globs with str.endswith, so a non-string here would be
+        # a traceback rather than the parse error it is.
+        if field in entry and not isinstance(entry[field], str):
+            raise PolicyError(
+                f"exempt[{position}]: {field} must be a string, got {entry[field]!r}"
+            )
+    if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
+        # Same rule the ignore file had: an accepted risk with no stated
+        # reason is indistinguishable from a mistake six months later.
+        raise PolicyError(f"exempt[{position}]: needs a reason")
 
 
 def load_policy(path=None):
