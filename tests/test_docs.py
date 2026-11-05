@@ -6,6 +6,7 @@ The rule table, the exit-code table and the policy examples are what a reader
 copies into CI. A doc that drifts from the code is a gate configured wrong.
 """
 
+import argparse
 import re
 import sys
 import unittest
@@ -63,6 +64,27 @@ class PolicyExampleTest(unittest.TestCase):
                     for key, value in settings.items():
                         self.assertEqual(policy["rules"][name][key], value)
                 self.assertEqual(policy["exempt"], example.get("exempt", []))
+
+
+class CliCoverageTest(unittest.TestCase):
+    def test_every_subcommand_and_flag_is_documented(self):
+        page = read("getting-started.md")
+        subparsers = next(
+            action
+            for action in ra.build_parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        for command, parser in subparsers.choices.items():
+            with self.subTest(command=command):
+                self.assertIn(f"rbac-audit {command}", page)
+            for action in parser._actions:
+                if not action.option_strings or "--help" in action.option_strings:
+                    continue
+                with self.subTest(command=command, flag=action.option_strings):
+                    self.assertTrue(
+                        any(flag in page for flag in action.option_strings),
+                        f"{command} {action.option_strings} is not in the docs",
+                    )
 
 
 if __name__ == "__main__":
