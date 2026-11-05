@@ -7,8 +7,11 @@ copies into CI. A doc that drifts from the code is a gate configured wrong.
 """
 
 import argparse
+import json
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -85,6 +88,72 @@ class CliCoverageTest(unittest.TestCase):
                         any(flag in page for flag in action.option_strings),
                         f"{command} {action.option_strings} is not in the docs",
                     )
+
+
+class DocumentedOutputTest(unittest.TestCase):
+    """Runs what getting-started.md shows as a real process, on real files.
+
+    The tests above read the docs against module constants; these start
+    `rbac_audit.py` with the documented flags, the documented policy files on
+    disk, and compare what it prints with what the page says it prints.
+    """
+
+    FIXTURES = ROOT / "tests" / "fixtures"
+    JSON_BLOCK = re.compile(r"^```json\n(.*?)^```", re.MULTILINE | re.DOTALL)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def diff(self, *argv):
+        # cwd is the temp dir, so ./.rbac-policy.yaml is only what a test writes.
+        return subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "rbac_audit.py"),
+                "diff",
+                str(self.FIXTURES / "before.json"),
+                str(self.FIXTURES / "after.json"),
+                *argv,
+            ],
+            cwd=self.tmp,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_json_summary_has_the_documented_keys(self):
+        documented = json.loads(self.JSON_BLOCK.findall(read("getting-started.md"))[0])
+        result = self.diff("--json", "-")
+        self.assertIn(
+            result.returncode, (ra.EXIT_OK, ra.EXIT_VIOLATIONS), result.stderr
+        )
+        self.assertEqual(set(json.loads(result.stdout)["summary"]), set(documented))
+
+    def test_files_only_diff_prints_the_documented_not_checked_line(self):
+        line = next(
+            line.strip()
+            for line in read("getting-started.md").splitlines()
+            if line.strip().startswith("[unused-service-account] needs")
+        )
+        result = self.diff()
+        self.assertIn("Not checked (1)", result.stdout)
+        self.assertIn(line, result.stdout)
+
+    def test_documented_policy_files_are_loaded_from_disk(self):
+        examples = [
+            block
+            for block in YAML_BLOCK.findall(read("getting-started.md"))
+            if block.startswith("version: 1")
+        ]
+        for block in examples:
+            with self.subTest(policy=block):
+                (self.tmp / ".rbac-policy.yaml").write_text(block)
+                result = self.diff()
+                self.assertIn(
+                    result.returncode, (ra.EXIT_OK, ra.EXIT_VIOLATIONS), result.stderr
+                )
 
 
 if __name__ == "__main__":
