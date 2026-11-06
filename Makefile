@@ -8,7 +8,7 @@ ARGS      ?= snapshot
 # FC-GEN-057: the same eight verbs in every repo, each either wired or a
 # declared no-op that says why. None of them exit 0 quietly.
 
-.PHONY: help setup install build run test test-unit lint format analyze push release
+.PHONY: help setup install build run test test-unit coverage lint format analyze push release
 
 .DEFAULT_GOAL := help
 
@@ -34,6 +34,10 @@ run: build ## Snapshot the cluster in your kubeconfig (ARGS=snapshot by default)
 
 test-unit: ## Unit tests only — no Docker, no cluster, no image build
 	python3 -m unittest discover -s tests
+
+coverage: ## Unit tests under coverage.py, with a line-by-line report
+	python3 -m coverage run -m unittest discover -s tests
+	python3 -m coverage report --show-missing
 
 # `build` is invoked from the recipe rather than declared a prerequisite:
 # prerequisites run first, and the point is that a logic error fails in

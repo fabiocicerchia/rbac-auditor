@@ -30,3 +30,10 @@ jobs:
 
       - name: Run unit tests, then build the image and smoke-test it
         run: make test
+
+      # Published to the run summary, so a pull request shows what it covers.
+      - name: Measure unit test coverage
+        run: |
+          pip install --require-hashes -r requirements-dev.txt
+          make coverage
+          python3 -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"

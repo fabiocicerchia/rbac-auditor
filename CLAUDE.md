@@ -27,6 +27,7 @@ make install      # pip install . — the CLI and its man page
 make build        # Build the image locally
 make run          # Snapshot the cluster in your kubeconfig (ARGS=snapshot)
 make test-unit    # Unit tests only — no Docker, no cluster
+make coverage     # The unit tests under coverage.py, with a report
 make test         # Build, then the unit tests and the image smoke tests
 make lint         # pre-commit run --all-files — the whole gate
 make format       # ruff format .
