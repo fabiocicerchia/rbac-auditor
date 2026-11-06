@@ -14,6 +14,9 @@ spec:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
+  # False positive for "without LimitRange/ResourceQuota": namespace policy,
+  # not this chart's to own.
+  # kics-scan ignore-line
   name: {{ include "app.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels: {{- include "app.labels" . | nindent 4 }}

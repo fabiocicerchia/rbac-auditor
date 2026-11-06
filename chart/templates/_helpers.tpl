@@ -42,6 +42,9 @@ metadata:
     checksum/config: {{ toYaml . | sha256sum }}
     {{- end }}
     {{- with .Values.podAnnotations }}{{- toYaml . | nindent 4 }}{{- end }}
+# False positive for "token automount not disabled": the token is how
+# the auditor reads the RBAC API, so it has to be mounted.
+# kics-scan ignore-line
 spec:
   {{- if eq .Values.kind "CronJob" }}
   restartPolicy: {{ .Values.cron.restartPolicy }}
