@@ -139,9 +139,7 @@ class LiveClusterTest(unittest.TestCase):
         )
 
         snap = json.loads((self.tmp / "snap.json").read_text())
-        self.assertEqual(
-            snap["clusterRoles"][0]["rules"][0]["verbs"], ["get", "list"]
-        )
+        self.assertEqual(snap["clusterRoles"][0]["rules"][0]["verbs"], ["get", "list"])
         self.assertEqual(
             snap["roleBindings"][0]["subjects"],
             [{"kind": "ServiceAccount", "name": "deployer", "namespace": "ci"}],
