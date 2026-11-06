@@ -308,7 +308,7 @@ adds it, which is the point of shipping it rather than describing it.
 ## Adding a policy rule
 
 1. A check function taking `(change, settings)` and yielding `_violation(...)`
-   records, next to the other four.
+   records, next to the other four in `rbac_audit_policy.py`.
 1. An entry in `DEFAULT_POLICY["rules"]` and one in `CHECKS`, keyed the same. A
    test asserts those two agree, so a rule with no check cannot ship.
 1. A case in `tests/test_policy.py` for the rule firing *and* for it not firing

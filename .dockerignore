@@ -2,4 +2,5 @@
 !Dockerfile
 !NOTICE
 !rbac_audit.py
+!rbac_audit_policy.py
 !requirements.txt
