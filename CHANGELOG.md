@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0](https://github.com/fabiocicerchia/rbac-auditor/compare/v2.0.1...v2.1.0) (2026-11-06)
+
+
+### Features
+
+* **policy:** masters-subject rule for a new binding to system:masters ([#98](https://github.com/fabiocicerchia/rbac-auditor/issues/98)) ([31c3889](https://github.com/fabiocicerchia/rbac-auditor/commit/31c38899470d4a9cd826e86e1b0e1b2df95c5c19))
+* **snapshot:** --from-manifests DIR, so the gate can run on a pull request ([#99](https://github.com/fabiocicerchia/rbac-auditor/issues/99)) ([31d8a13](https://github.com/fabiocicerchia/rbac-auditor/commit/31d8a13c5a19ba44908daaf99583a3406dee577a))
+
+
+### Bug Fixes
+
+* 2 issues found by code-atlas (end-of-life runtimes) ([#106](https://github.com/fabiocicerchia/rbac-auditor/issues/106)) ([01a8f3c](https://github.com/fabiocicerchia/rbac-auditor/commit/01a8f3cd6146ec89a38b537e5a476ad005663259))
+* 2 issues found by code-atlas (insights to act on) ([#103](https://github.com/fabiocicerchia/rbac-auditor/issues/103)) ([b22fb3c](https://github.com/fabiocicerchia/rbac-auditor/commit/b22fb3c665ecc74a3ccba920a796e525df5868b9))
+* 2 issues found by code-atlas (quality gates) ([#104](https://github.com/fabiocicerchia/rbac-auditor/issues/104)) ([ac1f32a](https://github.com/fabiocicerchia/rbac-auditor/commit/ac1f32adbfc91b88f6c117994c1f9f9b8df6ad1b))
+* 3 issues found by code-atlas (ci that cannot fail) ([#105](https://github.com/fabiocicerchia/rbac-auditor/issues/105)) ([6437fea](https://github.com/fabiocicerchia/rbac-auditor/commit/6437fead4b74191605d8b896127bb4e1c8cf24c3))
+* 3 issues found by code-atlas (code design) ([#107](https://github.com/fabiocicerchia/rbac-auditor/issues/107)) ([af5ddbc](https://github.com/fabiocicerchia/rbac-auditor/commit/af5ddbc194d1025d30f0323e945291a27fa25356))
+* 4 issues found by code-atlas (quality gates) ([#102](https://github.com/fabiocicerchia/rbac-auditor/issues/102)) ([cbf1b6f](https://github.com/fabiocicerchia/rbac-auditor/commit/cbf1b6f74cbe73d434e9db07c99588a0bd287742))
+* 6 issues found by code-atlas (test suites) ([#108](https://github.com/fabiocicerchia/rbac-auditor/issues/108)) ([474b72f](https://github.com/fabiocicerchia/rbac-auditor/commit/474b72fb1a6848e06d352c526c9c535c8ebc35cc))
+
 ## [2.0.1](https://github.com/fabiocicerchia/rbac-auditor/compare/v2.0.0...v2.0.1) (2026-09-20)
 
 
