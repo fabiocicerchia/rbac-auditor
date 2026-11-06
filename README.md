@@ -50,17 +50,16 @@ is any of it dangerous*. That is the point of this one.
 
 ## Features
 
-- Turns Kubernetes RBAC into a **markdown report a human actually reads**,
-  rather than a wall of YAML — RBAC drift is invisible until an incident.
-- Finds wildcard grants, cluster-admin bindings, unused ServiceAccounts and
-  dangling bindings.
-- `who-can VERB RESOURCE` answers the question you actually have — who can
-  `delete pods`.
-- **Snapshot and diff**: `dump` archives a JSON snapshot, `diff` reports added,
-  removed and changed roles and bindings against it, so month-over-month drift
-  is visible.
-- `--fail-on-findings` gates CI, `--ignore-file` carries the exceptions you
-  have accepted, `--html` produces something shareable.
+- **Snapshot and diff**: `snapshot` writes a deterministic JSON file to commit,
+  `diff` reports added, removed and changed roles and bindings against it — or
+  between two snapshots — so week-over-week drift is a pull request.
+- A **policy decides the exit code**: new cluster-admin bindings, wildcard
+  grants, `bind`/`escalate`/`impersonate`, anonymous bindings and dangling
+  bindings fail the build; unused ServiceAccounts warn. Exemptions live in
+  `.rbac-policy.yaml`.
+- `baseline` is the same diff against an empty cluster — the day-one audit.
+- `snapshot --from-manifests DIR` reads YAML instead of a cluster, so the gate
+  runs on a pull request.
 - Runs read-only in-cluster on a schedule — the CronJob and its ClusterRole
   are in `manifests/` — or locally against your kubeconfig.
 

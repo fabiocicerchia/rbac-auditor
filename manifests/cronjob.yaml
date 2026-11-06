@@ -34,8 +34,9 @@ spec:
           containers:
             - name: audit
               # Pinned: the bare name resolved to :latest, which would silently
-              # change what this cluster-reader runs. Matches publish.yml.
-              image: ghcr.io/fabiocicerchia/rbac-auditor:1.0.0
+              # change what this cluster-reader runs. publish.yml tags each
+              # release with its version; keep this equal to version.txt.
+              image: ghcr.io/fabiocicerchia/rbac-auditor:2.0.1  # VERSION-BUMP
               imagePullPolicy: Always
               args: ["snapshot"]
               securityContext:
