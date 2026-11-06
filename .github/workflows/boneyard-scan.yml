@@ -43,12 +43,16 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Post to boneyard
-        continue-on-error: true
         env:
           TOKEN: ${{ secrets.BONEYARD_TOKEN }}
           REPORT: ${{ steps.depwatch.outputs.report }}
         run: |
           set -euo pipefail
+          # A fork's scheduled run has no repository secrets.
+          if [ -z "${TOKEN}" ]; then
+            echo "::warning::BONEYARD_TOKEN unavailable to this run; not posted to boneyard"
+            exit 0
+          fi
           curl --fail-with-body --silent --show-error \
             --retry 3 --retry-connrefused --max-time 60 \
             -X POST https://app.boneyard.run/v1/scans \
