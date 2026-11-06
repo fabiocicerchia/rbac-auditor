@@ -24,7 +24,7 @@ dev = ["coverage", "pytest", "ruff"]
 
 # Measure the module, not the tests that exercise it.
 [tool.coverage.run]
-source = ["rbac_audit"]
+source = ["rbac_audit", "rbac_audit_policy"]
 
 [project.scripts]
 rbac-audit = "rbac_audit:main"
