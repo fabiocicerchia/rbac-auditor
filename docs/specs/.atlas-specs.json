@@ -1,0 +1,232 @@
+{
+ "excluded": {
+  "stylesheets/extra": [
+   {
+    "candidate": "Header is translucent and blurred with a hairline divider; tabs dimmed until hovered or active",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#.md-header"
+   },
+   {
+    "candidate": "Heading weights, letter-spacing and font ligatures",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#.md-typeset h1"
+   },
+   {
+    "candidate": "Rounded, bordered code blocks",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#.md-typeset .highlight"
+   },
+   {
+    "candidate": "Pill-shaped buttons with gradient primary and lift on hover",
+    "covered_by": "documentation.site-theme.single-shared-palette",
+    "reason": "DUPLICATE_OF",
+    "source": "docs/stylesheets/extra.css#.md-typeset .md-button--primary"
+   },
+   {
+    "candidate": "Home hero with gradient headline and tagline",
+    "covered_by": "documentation.site-theme.single-shared-palette",
+    "reason": "DUPLICATE_OF",
+    "source": "docs/stylesheets/extra.css#.md-typeset .hero h1"
+   },
+   {
+    "candidate": "Feature cards with rounded borders, hover lift and accent-coloured icons",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#.md-typeset .grid.cards > ul > li"
+   },
+   {
+    "candidate": "Bold nav title and active nav link",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#.md-nav__link--active"
+   },
+   {
+    "candidate": "Footer background and divider",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#.md-footer-meta"
+   },
+   {
+    "candidate": "Smooth scrolling to anchors",
+    "covered_by": "",
+    "reason": "TRIVIAL",
+    "source": "docs/stylesheets/extra.css#html"
+   }
+  ]
+ },
+ "lifted": {
+  "stylesheets/extra": []
+ },
+ "retired": [],
+ "scenarios": {
+  "docs.documentation.site-theme.001": {
+   "file": "docs/specs/documentation/site-theme/docs-site-theme.feature",
+   "fingerprint": "ac660254fd34",
+   "human": false,
+   "rule": "documentation.site-theme.single-shared-palette",
+   "source": "docs/stylesheets/extra.css#:root",
+   "status": "inferred",
+   "test": "",
+   "tests": []
+  },
+  "docs.documentation.site-theme.002": {
+   "file": "docs/specs/documentation/site-theme/docs-site-theme.feature",
+   "fingerprint": "ac660254fd34",
+   "human": false,
+   "rule": "documentation.site-theme.no-external-assets",
+   "source": "docs/stylesheets/extra.css#:root",
+   "status": "inferred",
+   "test": "",
+   "tests": []
+  },
+  "docs.documentation.site-theme.003": {
+   "file": "docs/specs/documentation/site-theme/docs-site-theme.feature",
+   "fingerprint": "433084a194b6",
+   "human": false,
+   "rule": "documentation.site-theme.legible-in-both-schemes",
+   "source": "docs/stylesheets/extra.css#[data-md-color-scheme=\"slate\"]",
+   "status": "inferred",
+   "test": "",
+   "tests": []
+  },
+  "docs.documentation.site-theme.004": {
+   "file": "docs/specs/documentation/site-theme/docs-site-theme.feature",
+   "fingerprint": "721086d36c47",
+   "human": false,
+   "rule": "documentation.site-theme.wide-tables-scroll",
+   "source": "docs/stylesheets/extra.css#.md-typeset table:not([class])",
+   "status": "inferred",
+   "test": "",
+   "tests": []
+  },
+  "docs.documentation.site-theme.005": {
+   "file": "docs/specs/documentation/site-theme/docs-site-theme.feature",
+   "fingerprint": "c702704e5aae",
+   "human": false,
+   "rule": "documentation.site-theme.no-placeholder-logo",
+   "source": "docs/stylesheets/extra.css#.md-header__button.md-logo",
+   "status": "inferred",
+   "test": "",
+   "tests": []
+  }
+ },
+ "taxonomy": {
+  "domains": [
+   {
+    "areas": [
+     {
+      "description": "Reading Roles, Bindings and ServiceAccounts from the live cluster into a snapshot.",
+      "slug": "capture",
+      "title": "Cluster capture"
+     },
+     {
+      "description": "The stable, deterministically ordered, timestamp-free snapshot payload.",
+      "slug": "file-format",
+      "title": "Snapshot format"
+     }
+    ],
+    "description": "Capturing a cluster's RBAC into a deterministic, committable JSON file.",
+    "slug": "snapshots",
+    "title": "RBAC snapshots"
+   },
+   {
+    "areas": [
+     {
+      "description": "Computing additions, removals and changes between two RBAC states.",
+      "slug": "diff",
+      "title": "Snapshot diff"
+     },
+     {
+      "description": "Auditing a cluster against an empty state for day-one findings.",
+      "slug": "baseline",
+      "title": "Baseline audit"
+     }
+    ],
+    "description": "Comparing snapshots, or a snapshot against the live cluster, to surface RBAC changes.",
+    "slug": "drift",
+    "title": "Drift detection"
+   },
+   {
+    "areas": [
+     {
+      "description": "Built-in checks such as privilege escalation, dangling bindings and unused ServiceAccounts.",
+      "slug": "rules",
+      "title": "Policy rules"
+     },
+     {
+      "description": "How findings map to pass, fail or not-checked outcomes for CI.",
+      "slug": "exit-codes",
+      "title": "Verdicts and exit codes"
+     },
+     {
+      "description": "Presenting findings to humans and machines.",
+      "slug": "reporting",
+      "title": "Reports"
+     }
+    ],
+    "description": "Rules that judge RBAC changes and decide the audit outcome.",
+    "slug": "policy",
+    "title": "Policy and findings"
+   },
+   {
+    "areas": [
+     {
+      "description": "CLI install, container image, manifests and Helm chart.",
+      "slug": "install",
+      "title": "Installation"
+     },
+     {
+      "description": "The read-only, least-privilege RBAC the auditor itself runs with.",
+      "slug": "access",
+      "title": "Auditor permissions"
+     }
+    ],
+    "description": "Running the auditor in a cluster with least-privilege access.",
+    "slug": "operations",
+    "title": "Deployment and operations"
+   },
+   {
+    "areas": [
+     {
+      "description": "Getting started, architecture and reference pages.",
+      "slug": "guides",
+      "title": "Guides"
+     },
+     {
+      "description": "The shared visual theme, palette and typography for the docs and splash page, served without external assets.",
+      "slug": "site-theme",
+      "title": "Site look and feel"
+     }
+    ],
+    "description": "The published guides and landing page that explain the product.",
+    "slug": "documentation",
+    "title": "Documentation site"
+   },
+   {
+    "areas": [
+     {
+      "description": "Make targets, unit tests and image smoke tests.",
+      "slug": "build-test",
+      "title": "Build and test"
+     },
+     {
+      "description": "Pre-commit hooks, linting, security scanning and CI.",
+      "slug": "quality-gates",
+      "title": "Quality gates"
+     },
+     {
+      "description": "Versioning, changelog and multi-arch image publishing.",
+      "slug": "release",
+      "title": "Release"
+     }
+    ],
+    "description": "Build, test, lint and release workflow for contributors.",
+    "slug": "developer-tooling",
+    "title": "Developer tooling"
+   }
+  ]
+ }
+}
