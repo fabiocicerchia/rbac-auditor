@@ -4,7 +4,7 @@ Feature: Auditing a whole cluster on day one
 
   @id:drift-detection.baseline-audit.001 @rule:drift.baseline.whole-cluster-judged @verified @source:rbac_audit.py#run_baseline @test:tests/test_cli.py#test_it_judges_a_whole_snapshot
   Scenario: A baseline reports every standing problem, not just recent changes
-    Given after.json binds a ServiceAccount to cluster-admin and grants access to system:anonymous
+    Given after.json binds a ServiceAccount to cluster-admin and binds Group system:unauthenticated to ClusterRole view
     When the operator runs `rbac-audit baseline after.json`
     Then the report is headed RBAC baseline — after.json
     And every object is listed as added, including ClusterRole/cluster-admin

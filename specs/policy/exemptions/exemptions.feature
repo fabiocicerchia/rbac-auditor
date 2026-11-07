@@ -26,7 +26,7 @@ Feature: Exempting accepted findings
     Examples:
       | match                                      | change                                                                             | outcome                                                                  |
       | rule wildcard, object ClusterRole/system:* | adds ClusterRole app granting get on x in apiGroup *                               | a blocking wildcard finding on ClusterRole/app                           |
-      | object ClusterRoleBinding/cluster-admin    | adds ClusterRoleBindings cluster-admin and breakglass binding Group system:masters | a blocking masters-subject finding on ClusterRoleBinding/breakglass only |
+      | object ClusterRoleBinding/cluster-admin    | binds system:masters via cluster-admin to cluster-admin, via breakglass to view    | a blocking masters-subject finding on ClusterRoleBinding/breakglass only |
       | object ClusterRole/system:*                | adds ClusterRole system:controller:x granting * on *.*                             | every finding on that role exempted                                      |
 
   @id:policy.exemptions.003 @rule:policy.exemptions.must-state-reason-and-match @verified @source:rbac_audit_policy.py#_check_exemption @test:tests/test_policy.py#test_an_exemption_needs_a_reason @test:tests/test_policy.py#test_an_exemption_needs_something_to_match_on @test:tests/test_policy.py#test_a_non_string_exempt_value_is_fatal @test:tests/test_policy.py#test_a_non_string_reason_is_fatal

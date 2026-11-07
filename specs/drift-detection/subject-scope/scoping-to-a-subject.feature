@@ -3,7 +3,7 @@ Feature: Scoping an audit to one subject
   Lets a reviewer ask what changed for one user, group or ServiceAccount, without losing the gate on that subject's new access.
 
   Background:
-    Given Given the committed snapshot before.json and a newer snapshot after.json
+    Giventhe committed snapshot before.json and a newer snapshot after.json
 
   @id:drift-detection.subject-scope.001 @rule:drift.subject.only-reaching-objects @verified @source:rbac_audit.py#subject_scope @test:tests/test_subject.py#test_only_objects_that_reach_the_subject_survive @test:tests/test_cli.py#test_the_matrix_replaces_the_object_diff
   Scenario: A subject-scoped diff mentions only the bindings that name the subject and the roles they reference

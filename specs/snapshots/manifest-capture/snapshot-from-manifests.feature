@@ -3,7 +3,7 @@ Feature: Snapshotting RBAC from manifests
   Lets an operator snapshot the RBAC a pull request proposes straight from its YAML/JSON files, with no cluster, so the gate can run before anything is applied.
 
   Background:
-    Given Given a directory of Kubernetes manifests the operator proposes to apply
+    Givena directory of Kubernetes manifests the operator proposes to apply
 
   @id:snapshots.manifest-capture.001 @rule:snapshots.manifests.rbac-kinds-only @verified @source:rbac_audit.py#capture_manifests @test:tests/test_cli.py#test_it_keeps_rbac_and_service_accounts_and_nothing_else @test:tests/test_cli.py#test_kubectl_is_never_called @test:tests/test_cli.py#test_a_json_manifest_is_read_like_kubectl_reads_it @test:tests/test_cli.py#test_a_kind_list_is_unwrapped
   Scenario: A manifest snapshot holds the RBAC objects and ServiceAccounts kubectl would apply, and nothing else

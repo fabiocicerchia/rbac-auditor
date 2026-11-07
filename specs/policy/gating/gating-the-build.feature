@@ -3,7 +3,7 @@ Feature: Gating a build on the policy
   Lets CI pass or fail a change on the policy verdict through a stable exit code, with a report-only mode for rolling the gate out.
 
   Background:
-    Given Given the committed snapshot before.json and a newer snapshot after.json
+    Giventhe committed snapshot before.json and a newer snapshot after.json
 
   @id:policy.gating.001 @rule:policy.gating.exit-code-reflects-verdict @verified @source:rbac_audit.py#report_and_exit @test:tests/test_cli.py#test_policy_violations_exit_2 @test:tests/test_cli.py#test_a_new_binding_to_system_masters_fails_the_gate @test:tests/test_cli.py#test_no_changes_exits_0 @test:tests/test_cli.py#test_warn_only_rules_report_but_do_not_gate
   Scenario Outline: The exit code is 2 when a gating violation is found and 0 otherwise

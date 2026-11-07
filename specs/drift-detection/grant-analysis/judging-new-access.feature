@@ -3,7 +3,7 @@ Feature: Judging only genuinely new access
   Spares teams false alarms: the gate judges what a subject can newly do, so tightening or refactoring a rule never fails a build while any real widening does.
 
   Background:
-    Given Given a Role whose rules change between the committed snapshot and the new one
+    Givena Role whose rules change between the committed snapshot and the new one
 
   @id:drift-detection.grant-analysis.001 @rule:drift.grants.tightening-is-not-new-access @verified @source:rbac_audit.py#grant_delta @test:tests/test_diff.py#test_a_broad_grant_implies_a_narrow_one @test:tests/test_diff.py#test_narrowing_a_rule_adds_no_grants @test:tests/test_diff.py#test_splitting_one_rule_into_two_adds_no_grants
   Scenario Outline: Tightening or restructuring a rule grants nothing new

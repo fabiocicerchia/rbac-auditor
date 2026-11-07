@@ -3,7 +3,7 @@ Feature: Subject access matrix
   Shows a reviewer, per namespace and resource, which verbs one subject gained, lost or kept, so the effect of an RBAC change on a person or workload reads at a glance.
 
   Background:
-    Given Given ServiceAccount ci/deployer is bound to roles in before.json and after.json
+    GivenServiceAccount ci/deployer is bound to roles in before.json and after.json
 
   @id:reporting.access-matrix.001 @rule:reporting.matrix.marks-gained-lost-unchanged @verified @source:rbac_audit.py#render_matrix @test:tests/test_subject.py#test_a_kept_verb_is_unchanged @test:tests/test_subject.py#test_a_lost_verb_is_marked_removed @test:tests/test_subject.py#test_columns_are_the_sorted_union_of_both_sides @test:tests/test_subject.py#test_rendering_marks_every_state
   Scenario: The matrix marks each verb as gained, lost, unchanged or not granted

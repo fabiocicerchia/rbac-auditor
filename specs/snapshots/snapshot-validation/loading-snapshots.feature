@@ -4,7 +4,7 @@ Feature: Loading snapshot files
 
   @id:snapshots.snapshot-validation.001 @rule:snapshots.validation.diff-report-refused @verified @source:rbac_audit.py#validate_snapshot @test:tests/test_cli.py#test_a_json_diff_report_is_refused_as_a_snapshot
   Scenario: A JSON diff report is refused when given as a snapshot
-    Given drift.json was written by `rbac-audit diff --json drift.json`
+    Given drift.json was written by `rbac-audit diff before.json after.json --json drift.json`
     When the operator runs `rbac-audit diff drift.json after.json`
     Then the command exits 65
     And stderr says the kind is RbacDiff and this looks like a --json diff report, not a snapshot

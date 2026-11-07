@@ -73,7 +73,7 @@ Feature: Flagging dangerous privilege grants
     Then the audit reports no findings
 
     Examples:
-      | change                                                                          |
-      | adds a ClusterRoleBinding binding ServiceAccount ci/deployer to view            |
-      | adds a ClusterRole granting get on pods.apps                                    |
-      | adds a ClusterRole granting get, list, watch on roles.rbac.authorization.k8s.io |
+      | change                                                                            |
+      | adds a ClusterRoleBinding binding the existing ServiceAccount ci/deployer to view |
+      | adds a ClusterRole granting get on pods.apps                                      |
+      | adds a ClusterRole granting get, list, watch on roles.rbac.authorization.k8s.io   |

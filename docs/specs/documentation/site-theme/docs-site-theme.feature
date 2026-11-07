@@ -10,7 +10,7 @@ Feature: A consistent, self-hosted look for the documentation and splash page
     Given the project's accent pair is orange #fb923c and red #ef4444
     When a reader opens the splash page and then the rendered docs
     Then the splash headline and its primary button use an orange-to-red gradient
-    And the docs header, links in the light scheme and the home hero use the same orange and red
+    And links in the light scheme, primary buttons and the home hero in the docs use the same orange and red
     And changing the accent pair in the docs theme changes both the splash page and the docs
 
   @id:docs.documentation.site-theme.002 @rule:documentation.site-theme.no-external-assets @inferred @source:docs/stylesheets/extra.css#:root

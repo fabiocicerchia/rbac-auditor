@@ -3,7 +3,7 @@ Feature: Machine-readable diff report
   Gives CI and tooling a stable JSON report of the same run the human reads, safe to pipe and small enough to keep.
 
   Background:
-    Given Given the committed snapshot before.json and a newer snapshot after.json
+    Giventhe committed snapshot before.json and a newer snapshot after.json
 
   @id:reporting.json-report.001 @rule:reporting.json.stdout-is-pure-json @verified @source:rbac_audit.py#report_and_exit @test:tests/test_cli.py#test_json_to_stdout_is_the_only_thing_on_stdout
   Scenario: With --json -, stdout carries only the JSON report
